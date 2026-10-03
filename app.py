@@ -4,10 +4,16 @@ from urllib.parse import urljoin, urlparse, urldefrag, parse_qsl, urlencode
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, render_template_string
+from threading import Thread
+from uuid import uuid4
+from datetime import datetime, timezone
+import traceback
 
 app = Flask(__name__)
+JOBS = {}
+JOBS_LOCK = __import__('threading').Lock()
 UA = "TechMakLabs-KeywordEcosystem/0.1 (+website-research)"
-TIMEOUT = 8
+TIMEOUT = (4,4)
 MAX_DEFAULT = 75
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
@@ -55,9 +61,38 @@ let url=document.getElementById("url").value.trim(), ks=document.getElementById(
 if(!url||!ks.length){document.getElementById("err").textContent="Enter a website and at least one keyword.";return}
 document.getElementById("err").textContent="";document.getElementById("loading").style.display="block";document.getElementById("bar").style.width="15%";
 fetch("/api/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url,keywords:ks,max_pages:max})})
-.then(async r=>{let raw=await r.text();let d;try{d=JSON.parse(raw)}catch(e){throw new Error("Server returned non-JSON response ("+r.status+"). This usually means the Railway request timed out or the app crashed. Check Railway logs.")}if(!r.ok)throw new Error(d.error||"Analysis failed");return d})
-.then(d=>{DATA=d;document.getElementById("bar").style.width="100%";render(d);setTimeout(()=>document.getElementById("loading").style.display="none",400)})
+.then(async r=>{let raw=await r.text();let d;try{d=JSON.parse(raw)}catch(e){throw new Error("Server returned non-JSON response ("+r.status+"). Check Railway logs.")}if(!r.ok)throw new Error(d.error||"Analysis failed");return d})
+.then(d=>pollJob(d.job_id))
 .catch(e=>{document.getElementById("loading").style.display="none";document.getElementById("err").textContent=e.message});
+
+function pollJob(jobId){
+  const started=Date.now();
+  const timer=setInterval(async()=>{
+    try{
+      const r=await fetch("/api/jobs/"+jobId);
+      const d=await r.json();
+      document.getElementById("bar").style.width=(d.progress||0)+"%";
+      document.getElementById("msg").textContent=d.message||"researching";
+      if(d.status==="complete"){
+        clearInterval(timer);
+        DATA=d.result; render(d.result);
+        document.getElementById("bar").style.width="100%";
+        setTimeout(()=>document.getElementById("loading").style.display="none",400);
+      } else if(d.status==="failed"){
+        clearInterval(timer);
+        document.getElementById("loading").style.display="none";
+        document.getElementById("err").textContent="Research failed: "+(d.message||"Unknown error");
+      } else if(Date.now()-started>15*60*1000){
+        clearInterval(timer);
+        document.getElementById("err").textContent="Research is still running. You can check Railway logs; the job is running in the background.";
+      }
+    }catch(e){
+      clearInterval(timer);
+      document.getElementById("loading").style.display="none";
+      document.getElementById("err").textContent="Could not read research status: "+e.message;
+    }
+  },1000);
+}
 }
 function render(d){
 document.getElementById("results").style.display="block";
@@ -231,49 +266,86 @@ def api_analyze():
     url=str(data.get("url","")).strip()
     keywords=[str(x).strip() for x in data.get("keywords",[]) if str(x).strip()][:3]
     max_pages=min(max(int(data.get("max_pages",MAX_DEFAULT)),10),200)
-    if not url or not keywords: return jsonify(error="Website URL and at least one keyword are required."),400
-    try:
-        root,smaps,sm_urls,queue,pages,failed=crawl(url,keywords,max_pages)
-    except Exception as e:
-        return jsonify(error=str(e)),500
-    mappings=[]
-    for kw in keywords:
-        ranked=sorted(pages,key=lambda p:keyword_score(kw,p),reverse=True)
-        best=ranked[0] if ranked else None
-        second=ranked[1] if len(ranked)>1 else None
-        score=keyword_score(kw,best) if best else 0
-        if not best or score<35:
-            decision="CREATE"; evidence="No existing page has a strong relevance score."
-        elif second and score-second["keyword_score"]<8 and second["keyword_score"]>=45:
-            decision="REVIEW / CANNIBALIZATION"; evidence=f"Top two pages are close: {best['path']} ({score}%) vs {second['path']} ({second['keyword_score']}%)."
-        else:
-            decision="OPTIMIZE"; evidence=f"Existing {best['page_type'].lower()} page is the strongest match."
-        mappings.append({"keyword":kw,"url":best["url"] if best and score>=35 else None,"score":score,"decision":decision,"evidence":evidence})
-    opportunities=[]
-    for p in pages:
-        for f in p["flags"]:
-            opportunities.append({"type":f["label"],"message":p["path"]})
-    for m in mappings:
-        if m["decision"]=="CREATE": opportunities.append({"type":"CONTENT GAP","message":f"No strong existing target for “{m['keyword']}”."})
-        if m["decision"].startswith("REVIEW"): opportunities.append({"type":"CANNIBALIZATION","message":f"Review competing URLs for “{m['keyword']}”."})
-    from collections import defaultdict
-    groups=defaultdict(list)
-    for p in pages: groups[p["page_type"]].append(p)
-    architecture=[]
-    for typ,arr in sorted(groups.items(),key=lambda x:-len(x[1])):
-        architecture.append({"type":typ,"count":len(arr),"examples":[{"url":x["url"],"path":x["path"]} for x in arr[:8]]})
-    result={
-      "site":{"url":root,"analyzed_at":time.strftime("%Y-%m-%d %H:%M:%S UTC",time.gmtime())},
-      "discovery":{"robots_or_sitemap_candidates":smaps,"sitemap_urls_found":len(sm_urls),"crawl_queue_discovered":len(set(queue)),"failed_or_skipped":len(failed),"same_domain":"yes"},
-      "stats":{"urls_discovered":len(set(queue)),"pages_analyzed":len(pages),"sitemap_urls":len(sm_urls),"thin_pages":sum(any(f["label"]=="THIN" for f in p["flags"]) for p in pages),"missing_metadata":sum(any(f["label"]=="NO META" for f in p["flags"]) for p in pages),"duplicate_titles":duplicate_count(pages,"title")},
-      "summary":f"Analyzed {len(pages)} HTML pages from the supplied domain. URL discovery used sitemap candidates plus same-domain internal links. Results are generated from the crawled site, not demo data.",
-      "keyword_mapping":mappings,
-      "pages":[{k:v for k,v in p.items() if k!="text"} for p in pages],
-      "opportunities":opportunities[:300],
-      "architecture":architecture,
-      "failed_urls":failed[:100]
-    }
-    return jsonify(result)
+    if not url or not keywords:
+        return jsonify(error="Website URL and at least one keyword are required."),400
+
+    job_id=str(uuid4())
+    with JOBS_LOCK:
+        JOBS[job_id]={
+            "id":job_id,"status":"queued","progress":0,
+            "message":"Research queued","created_at":datetime.now(timezone.utc).isoformat()
+        }
+
+    def worker():
+        try:
+            with JOBS_LOCK:
+                JOBS[job_id].update(status="running",progress=5,message="Discovering robots.txt and sitemaps")
+            root,smaps,sm_urls,queue,pages,failed=crawl(url,keywords,max_pages)
+
+            mappings=[]
+            for kw in keywords:
+                ranked=sorted(pages,key=lambda p:keyword_score(kw,p),reverse=True)
+                best=ranked[0] if ranked else None
+                second=ranked[1] if len(ranked)>1 else None
+                score=keyword_score(kw,best) if best else 0
+                if not best or score<35:
+                    decision="CREATE"; evidence="No existing page has a strong relevance score."
+                elif second and score-second["keyword_score"]<8 and second["keyword_score"]>=45:
+                    decision="REVIEW / CANNIBALIZATION"; evidence=f"Top two pages are close: {best['path']} ({score}%) vs {second['path']} ({second['keyword_score']}%)."
+                else:
+                    decision="OPTIMIZE"; evidence=f"Existing {best['page_type'].lower()} page is the strongest match."
+                mappings.append({"keyword":kw,"url":best["url"] if best and score>=35 else None,"score":score,"decision":decision,"evidence":evidence})
+
+            opportunities=[]
+            for p in pages:
+                for f in p["flags"]:
+                    opportunities.append({"type":f["label"],"message":p["path"]})
+            for m in mappings:
+                if m["decision"]=="CREATE":
+                    opportunities.append({"type":"CONTENT GAP","message":f"No strong existing target for “{m['keyword']}”."})
+                if m["decision"].startswith("REVIEW"):
+                    opportunities.append({"type":"CANNIBALIZATION","message":f"Review competing URLs for “{m['keyword']}”."})
+
+            from collections import defaultdict
+            groups=defaultdict(list)
+            for p in pages: groups[p["page_type"]].append(p)
+            architecture=[]
+            for typ,arr in sorted(groups.items(),key=lambda x:-len(x[1])):
+                architecture.append({"type":typ,"count":len(arr),"examples":[{"url":x["url"],"path":x["path"]} for x in arr[:8]]})
+
+            result={
+              "site":{"url":root,"analyzed_at":time.strftime("%Y-%m-%d %H:%M:%S UTC",time.gmtime())},
+              "discovery":{"robots_or_sitemap_candidates":smaps,"sitemap_urls_found":len(sm_urls),"crawl_queue_discovered":len(set(queue)),"failed_or_skipped":len(failed),"same_domain":"yes"},
+              "stats":{"urls_discovered":len(set(queue)),"pages_analyzed":len(pages),"sitemap_urls":len(sm_urls),"thin_pages":sum(any(f["label"]=="THIN" for f in p["flags"]) for p in pages),"missing_metadata":sum(any(f["label"]=="NO META" for f in p["flags"]) for p in pages),"duplicate_titles":duplicate_count(pages,"title")},
+              "summary":f"Analyzed {len(pages)} HTML pages from the supplied domain. URL discovery used sitemap candidates plus same-domain internal links. Results are generated from the crawled site, not demo data.",
+              "keyword_mapping":mappings,
+              "pages":[{k:v for k,v in p.items() if k!="text"} for p in pages],
+              "opportunities":opportunities[:300],
+              "architecture":architecture,
+              "failed_urls":failed[:100]
+            }
+            with JOBS_LOCK:
+                JOBS[job_id].update(status="complete",progress=100,message="Research complete",result=result)
+        except Exception as e:
+            with JOBS_LOCK:
+                JOBS[job_id].update(status="failed",progress=100,message=str(e),error=traceback.format_exc())
+
+    Thread(target=worker,daemon=True).start()
+    return jsonify({"job_id":job_id,"status":"queued","message":"Research started"}),202
+
+
+@app.get("/api/jobs/<job_id>")
+def api_job(job_id):
+    with JOBS_LOCK:
+        job=JOBS.get(job_id)
+        if not job:
+            return jsonify(error="Job not found"),404
+        return jsonify(job)
+
+
+@app.get("/api/health")
+def api_health():
+    return jsonify(ok=True,service="keyword-content-ecosystem",active_jobs=sum(1 for j in JOBS.values() if j["status"] in ("queued","running")))
 
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=int(__import__("os").environ.get("PORT",5000)))

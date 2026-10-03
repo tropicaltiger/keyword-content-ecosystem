@@ -1,34 +1,22 @@
-# Keyword Content Ecosystem — Phase 2.2
+# Keyword Content Ecosystem — Phase 2.3
 
-Real server-side website research engine.
+Background-crawler architecture for Railway.
 
-### v2.1 deployment hardening
-- 8 second HTTP timeout
-- 75-page default to keep first live tests responsive
-- Each page is fetched once instead of twice
-- Browser reports a useful error when Railway returns HTML/502 instead of JSON
-- Failed/skipped URLs are returned in the research JSON
-- Still supports up to 200 pages when explicitly requested
+## Why
+The previous version crawled the whole site inside `/api/analyze`. Gunicorn killed that synchronous request after its worker timeout. This version returns a job ID immediately and crawls in a background thread.
 
-## Run locally
+## Flow
+POST `/api/analyze` → job ID → background crawler → GET `/api/jobs/{id}` → dashboard results.
 
-```bash
-pip install -r requirements.txt
-python app.py
-```
-
-Open http://localhost:5000
+## Current limits
+- Default: 75 pages
+- Maximum: 200 pages
+- HTTP connect/read timeout: 4 seconds per operation
+- One fetch per page
+- Failed URLs recorded
 
 ## Railway
+Start command:
+`gunicorn --workers 1 --threads 4 --timeout 120 app:app`
 
-Deploy the repository and use:
-
-```bash
-gunicorn app:app
-```
-
-Railway supplies the PORT environment variable.
-
-## Next architecture improvement
-
-For large sites, move crawling into a background job + polling model so a 200–500 page research run is not tied to a single HTTP request.
+For production/multiple replicas, replace in-process jobs with Redis/Postgres-backed workers.
