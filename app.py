@@ -7,8 +7,8 @@ from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 UA = "TechMakLabs-KeywordEcosystem/0.1 (+website-research)"
-TIMEOUT = 15
-MAX_DEFAULT = 150
+TIMEOUT = 8
+MAX_DEFAULT = 75
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
 
@@ -28,7 +28,7 @@ button{border:0;border-radius:9px;padding:11px 17px;font-weight:800;cursor:point
 </style></head>
 <body><header><h1>Keyword Content Ecosystem</h1><p>Phase 2.2 — Real website research engine</p></header><main>
 <div class="panel">
-<div class="row"><div class="field"><label>WEBSITE URL</label><input id="url" placeholder="https://nims.ae"></div><div class="field"><label>MAX PAGES</label><input id="max" type="number" min="10" max="500" value="150"></div></div>
+<div class="row"><div class="field"><label>WEBSITE URL</label><input id="url" placeholder="https://nims.ae"></div><div class="field"><label>MAX PAGES</label><input id="max" type="number" min="10" max="200" value="75"></div></div>
 <div class="field"><label>TARGET KEYWORDS — 1 to 3, one per line</label><textarea id="keywords" placeholder="hse manpower dubai&#10;hse jobs training dubai&#10;hse dubai"></textarea></div>
 <button class="primary" onclick="analyze()">Analyze Website</button>
 <button class="secondary" onclick="loadNims()">Load NIMS Test</button>
@@ -55,7 +55,7 @@ let url=document.getElementById("url").value.trim(), ks=document.getElementById(
 if(!url||!ks.length){document.getElementById("err").textContent="Enter a website and at least one keyword.";return}
 document.getElementById("err").textContent="";document.getElementById("loading").style.display="block";document.getElementById("bar").style.width="15%";
 fetch("/api/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url,keywords:ks,max_pages:max})})
-.then(async r=>{let d=await r.json();if(!r.ok)throw new Error(d.error||"Analysis failed");return d})
+.then(async r=>{let raw=await r.text();let d;try{d=JSON.parse(raw)}catch(e){throw new Error("Server returned non-JSON response ("+r.status+"). This usually means the Railway request timed out or the app crashed. Check Railway logs.")}if(!r.ok)throw new Error(d.error||"Analysis failed");return d})
 .then(d=>{DATA=d;document.getElementById("bar").style.width="100%";render(d);setTimeout(()=>document.getElementById("loading").style.display="none",400)})
 .catch(e=>{document.getElementById("loading").style.display="none";document.getElementById("err").textContent=e.message});
 }
@@ -153,10 +153,10 @@ def keyword_score(kw, page):
     score=min(100, round((hits/max(1,len(terms)*5))*45 + (phrase>0)*25 + (title_hits/max(1,len(terms)))*30))
     return score
 
-def analyze_page(url, keywords):
-    r=get(url)
-    if not r or not r.ok or "text/html" not in r.headers.get("content-type",""): return None
-    soup=BeautifulSoup(r.text,"html.parser")
+def analyze_response(url, response, keywords):
+    if not response or not response.ok or "text/html" not in response.headers.get("content-type","").lower():
+        return None, []
+    soup=BeautifulSoup(response.text,"html.parser")
     title=soup.title.get_text(" ",strip=True) if soup.title else ""
     md=soup.find("meta",attrs={"name":re.compile("^description$",re.I)})
     meta=md.get("content","").strip() if md else ""
@@ -167,7 +167,9 @@ def analyze_page(url, keywords):
     text=visible_text(soup)
     wc=len(re.findall(r"\b[\w’'-]+\b",text))
     p=urlparse(url)
-    page={"url":url,"path":p.path or "/","title":title,"meta":meta,"h1":" | ".join(h1[:3]),"h2":" | ".join(h2[:8]),"canonical":canonical,"word_count":wc,"text":text[:12000]}
+    page={"url":url,"path":p.path or "/","title":title,"meta":meta,"h1":" | ".join(h1[:3]),
+          "h2":" | ".join(h2[:8]),"canonical":canonical,"word_count":wc,
+          "text":text[:12000]}
     scores=[keyword_score(k,page) for k in keywords]
     page["keyword_score"]=max(scores or [0])
     page["best_keyword"]=keywords[scores.index(max(scores))] if scores else ""
@@ -179,7 +181,13 @@ def analyze_page(url, keywords):
     if wc<300: flags.append({"label":"THIN","level":"warn"})
     if len(h1)>1: flags.append({"label":"MULTIPLE H1","level":"warn"})
     page["flags"]=flags
-    return page
+
+    links=[]
+    for a in soup.find_all("a",href=True):
+        nu=norm_url(a["href"],url)
+        if nu:
+            links.append(nu)
+    return page, links
 
 def crawl(root, keywords, max_pages):
     root=norm_url(root)
@@ -191,26 +199,23 @@ def crawl(root, keywords, max_pages):
         sm_urls.extend(parse_sitemap(s))
     sm_urls=[norm_url(x) for x in sm_urls if x and same_domain(x,base)]
     queue=list(dict.fromkeys(sm_urls+[root]))
-    seen=set(); pages=[]
-    # sitemap-first, then same-domain internal links
+    seen=set(); pages=[]; failed=[]
     i=0
     while i<len(queue) and len(pages)<max_pages:
         u=norm_url(queue[i]); i+=1
         if not u or u in seen or not same_domain(u,base): continue
         seen.add(u)
-        pg=analyze_page(u,keywords)
-        if not pg: continue
-        pages.append(pg)
         r=get(u)
-        if r and r.ok and "text/html" in r.headers.get("content-type",""):
-            soup=BeautifulSoup(r.text,"html.parser")
-            for a in soup.find_all("a",href=True):
-                nu=norm_url(a["href"],u)
-                if nu and same_domain(nu,base) and nu not in seen and len(queue)<max_pages*5:
-                    # Skip obvious non-page assets
-                    if not re.search(r"\.(pdf|jpg|jpeg|png|gif|webp|svg|zip|docx?|xlsx?|pptx?)($|\?)",urlparse(nu).path.lower()):
-                        queue.append(nu)
-    return root,smaps,sm_urls,queue,pages
+        pg, links=analyze_response(u,r,keywords)
+        if not pg:
+            failed.append({"url":u,"reason":"not HTML / request failed / non-2xx"})
+            continue
+        pages.append(pg)
+        for nu in links:
+            if nu not in seen and same_domain(nu,base) and len(queue)<max_pages*5:
+                if not re.search(r"\.(pdf|jpg|jpeg|png|gif|webp|svg|zip|docx?|xlsx?|pptx?|mp4|mp3)($|\?)",urlparse(nu).path.lower()):
+                    queue.append(nu)
+    return root,smaps,sm_urls,queue,pages,failed
 
 def duplicate_count(pages,key):
     vals=[p[key].strip().lower() for p in pages if p[key].strip()]
@@ -225,10 +230,10 @@ def api_analyze():
     data=request.get_json(force=True) or {}
     url=str(data.get("url","")).strip()
     keywords=[str(x).strip() for x in data.get("keywords",[]) if str(x).strip()][:3]
-    max_pages=min(max(int(data.get("max_pages",MAX_DEFAULT)),10),500)
+    max_pages=min(max(int(data.get("max_pages",MAX_DEFAULT)),10),200)
     if not url or not keywords: return jsonify(error="Website URL and at least one keyword are required."),400
     try:
-        root,smaps,sm_urls,queue,pages=crawl(url,keywords,max_pages)
+        root,smaps,sm_urls,queue,pages,failed=crawl(url,keywords,max_pages)
     except Exception as e:
         return jsonify(error=str(e)),500
     mappings=[]
@@ -259,13 +264,14 @@ def api_analyze():
         architecture.append({"type":typ,"count":len(arr),"examples":[{"url":x["url"],"path":x["path"]} for x in arr[:8]]})
     result={
       "site":{"url":root,"analyzed_at":time.strftime("%Y-%m-%d %H:%M:%S UTC",time.gmtime())},
-      "discovery":{"robots_or_sitemap_candidates":smaps,"sitemap_urls_found":len(sm_urls),"crawl_queue_discovered":len(set(queue)),"same_domain":"yes"},
+      "discovery":{"robots_or_sitemap_candidates":smaps,"sitemap_urls_found":len(sm_urls),"crawl_queue_discovered":len(set(queue)),"failed_or_skipped":len(failed),"same_domain":"yes"},
       "stats":{"urls_discovered":len(set(queue)),"pages_analyzed":len(pages),"sitemap_urls":len(sm_urls),"thin_pages":sum(any(f["label"]=="THIN" for f in p["flags"]) for p in pages),"missing_metadata":sum(any(f["label"]=="NO META" for f in p["flags"]) for p in pages),"duplicate_titles":duplicate_count(pages,"title")},
       "summary":f"Analyzed {len(pages)} HTML pages from the supplied domain. URL discovery used sitemap candidates plus same-domain internal links. Results are generated from the crawled site, not demo data.",
       "keyword_mapping":mappings,
       "pages":[{k:v for k,v in p.items() if k!="text"} for p in pages],
       "opportunities":opportunities[:300],
-      "architecture":architecture
+      "architecture":architecture,
+      "failed_urls":failed[:100]
     }
     return jsonify(result)
 
