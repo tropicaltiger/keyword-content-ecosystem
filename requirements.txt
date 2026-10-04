@@ -1,5 +1,5 @@
-Flask==3.1.2
-requests==2.32.5
-beautifulsoup4==4.13.5
-lxml==6.0.2
-gunicorn==23.0.0
+flask>=3.0
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+gunicorn>=22.0

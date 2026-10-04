@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keyword Content Ecosystem</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <h1>Keyword Content Ecosystem</h1>
+    <p class="lede">Find which page should rank for each keyword, what to fix on it, and where the site has gaps.</p>
+
+    <form id="form" novalidate>
+      <label for="url">Website</label>
+      <input id="url" name="url" type="text" inputmode="url" placeholder="example.com" autocomplete="off">
+
+      <label for="keywords">Keywords <span class="hint">one per line, up to 5</span></label>
+      <textarea id="keywords" name="keywords" rows="5" placeholder="hse manpower dubai&#10;hse training courses"></textarea>
+
+      <label for="max">Pages to crawl <span class="hint">10 to 300</span></label>
+      <input id="max" name="max" type="number" min="10" max="300" value="75">
+
+      <div id="keyRow" hidden>
+        <label for="key">Access key</label>
+        <input id="key" type="password" autocomplete="off">
+      </div>
+
+      <div class="actions">
+        <button type="submit" id="run" class="primary">Analyze website</button>
+        <button type="button" id="cancel" class="ghost" hidden>Cancel</button>
+      </div>
+
+      <div id="progress" class="progress-wrap" hidden>
+        <div class="track"><div id="bar" class="bar"></div></div>
+        <p id="msg" class="progress-msg" aria-live="polite"></p>
+      </div>
+      <p id="err" class="error" role="alert"></p>
+    </form>
+
+    <p class="fine">The crawler reads public pages only, follows robots.txt and keeps its request rate low.</p>
+  </aside>
+
+  <main class="stage">
+    <section id="empty" class="empty">
+      <h2>Results appear here</h2>
+      <p>Enter a site and up to five keywords. For each keyword you get a verdict: optimize an existing page, create a new one, or resolve pages that compete with each other. You also get technical issues and a map of how the site is built.</p>
+    </section>
+
+    <section id="results" hidden>
+      <div class="toolbar">
+        <div class="tabs" role="tablist" aria-label="Result sections">
+          <button role="tab" aria-selected="true" data-tab="overview">Overview</button>
+          <button role="tab" aria-selected="false" data-tab="keywords">Keywords</button>
+          <button role="tab" aria-selected="false" data-tab="issues">Issues</button>
+          <button role="tab" aria-selected="false" data-tab="pages">Pages</button>
+          <button role="tab" aria-selected="false" data-tab="structure">Structure</button>
+          <button role="tab" aria-selected="false" data-tab="json">JSON</button>
+        </div>
+        <div class="downloads">
+          <button type="button" class="ghost" id="dlPages">Pages CSV</button>
+          <button type="button" class="ghost" id="dlIssues">Issues CSV</button>
+          <button type="button" class="ghost" id="dlJson">JSON</button>
+        </div>
+      </div>
+
+      <div class="panel" id="panel-overview" role="tabpanel"></div>
+      <div class="panel" id="panel-keywords" role="tabpanel" hidden></div>
+      <div class="panel" id="panel-issues" role="tabpanel" hidden></div>
+      <div class="panel" id="panel-pages" role="tabpanel" hidden></div>
+      <div class="panel" id="panel-structure" role="tabpanel" hidden></div>
+      <div class="panel" id="panel-json" role="tabpanel" hidden><pre id="jsonbox"></pre></div>
+    </section>
+  </main>
+</div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

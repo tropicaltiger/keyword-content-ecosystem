@@ -1,22 +1,45 @@
-# Keyword Content Ecosystem — Phase 2.3
+# Keyword Content Ecosystem (Phase 3)
 
-Background-crawler architecture for Railway.
+Crawl a website, then tell the user, for each target keyword, whether to **optimize an existing page**,
+**create a new page**, or **fix pages that compete**, plus technical issues and how the site is structured.
 
-## Why
-The previous version crawled the whole site inside `/api/analyze`. Gunicorn killed that synchronous request after its worker timeout. This version returns a job ID immediately and crawls in a background thread.
+## What changed from Phase 2.3
+- **Security:** private/internal addresses are blocked (SSRF guard, re-checked on every redirect); optional access key; per-IP rate limit.
+- **Polite crawling:** honors robots.txt `Disallow` and `Crawl-delay`; global request throttle; capped response size.
+- **Real structure:** breadth-first crawl gives each page a click depth; internal link graph gives links in/out, orphan pages, most-linked pages.
+- **Better matching:** field-weighted scoring (title, H1, URL, meta, H2, body) with exact-phrase bonus and whole-word matching (no more "art" matching "part").
+- **Actionable output:** each keyword gets a verdict, evidence, a concrete to-do list, competing pages, suggested internal links, intent mismatch warnings.
+- **Grouped issues** with fixes and CSV export; 404s show which page links to them; sitemap hygiene checks.
+- **Fixed bugs:** `lstrip("www.")`, wrong score in the cannibalization check, duplicate HTML ids, fake progress bar, misleading "URLs discovered".
+- Jobs expire and are capped in memory; jobs can be cancelled.
 
-## Flow
-POST `/api/analyze` → job ID → background crawler → GET `/api/jobs/{id}` → dashboard results.
+## Run locally
+```
+pip install -r requirements.txt
+python app.py            # http://localhost:5000
+```
+To crawl a site on your own machine (localhost), set `ALLOW_PRIVATE_HOSTS=1`. **Never set it in production.**
 
-## Current limits
-- Default: 75 pages
-- Maximum: 200 pages
-- HTTP connect/read timeout: 4 seconds per operation
-- One fetch per page
-- Failed URLs recorded
+## Environment variables
+| Variable | Default | Purpose |
+|---|---|---|
+| `APP_ACCESS_KEY` | unset | If set, the UI asks for it and the API requires `X-Access-Key` |
+| `MAX_CONCURRENT_JOBS` | 2 | Crawls running at once |
+| `RATE_LIMIT_PER_HOUR` | 10 | Analyses one IP can start per hour |
+| `ALLOW_PRIVATE_HOSTS` | unset | Local testing only |
 
-## Railway
-Start command:
-`gunicorn --workers 1 --threads 4 --timeout 120 app:app`
+## Deploy on Railway
+Push to GitHub and redeploy. Set `APP_ACCESS_KEY` in Railway Variables. Keep **one** gunicorn worker (jobs live in memory).
 
-For production/multiple replicas, replace in-process jobs with Redis/Postgres-backed workers.
+## Known limits (honest list)
+- Does not run JavaScript, so pages rendered only by JS look empty.
+- DNS-rebinding is a theoretical gap in the SSRF guard (host is resolved at check time and again at connect time).
+- Jobs are lost on restart. For several replicas, move jobs to Redis/Postgres.
+- Keyword scoring is lexical. Next step is embeddings or an LLM to judge intent and suggest missing subtopics.
+
+## Suggested next steps
+1. Save projects and re-crawl comparisons (Postgres).
+2. LLM-written content briefs per keyword (outline, FAQs, internal links).
+3. Competitor crawl and topic-gap comparison.
+4. Google Search Console data (real queries, clicks, positions).
+5. Playwright rendering for JS-heavy sites.
