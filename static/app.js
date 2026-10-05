@@ -4,7 +4,7 @@
   const link = (u, text) => /^https?:\/\//i.test(u)
     ? `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(text ?? u)}</a>` : esc(text ?? u);
 
-  let DATA = null, jobId = null, timer = null;
+  let DATA = null, jobId = null, timer = null, CFG = {}, cTimer = null, cJob = null;
   let KEY = sessionStorage.getItem("kce_key") || "";
   const sort = { key: "best_score", dir: -1 };
   let filter = "";
@@ -13,6 +13,7 @@
 
   // ---------------------------------------------------------------- setup
   fetch("/api/config").then(r => r.json()).then(c => {
+    CFG = c;
     if (c.auth_required) { $("#keyRow").hidden = false; $("#key").value = KEY; }
   }).catch(() => {});
 
@@ -89,6 +90,7 @@
     renderPagesTable();
     $("#panel-structure").innerHTML = structure(d.architecture);
     $("#jsonbox").textContent = JSON.stringify(d, null, 2);
+    buildContentPanel(d);
     showTab("keywords");
     window.scrollTo({ top: 0 });
   }
@@ -189,7 +191,7 @@
     $("#pbody").innerHTML = rows.map(p => `<tr>
       <td class="path">${link(p.url, p.path)}<span class="sub">${esc(p.title || "(no title)")}</span></td>
       <td>${esc(p.page_type)}</td><td class="num">${p.word_count}</td>
-      <td class="num">${p.depth ?? "–"}</td><td class="num">${p.inbound}</td>
+      <td class="num">${p.depth ?? "–"}</td><td class="num">${p.inbound}<span class="sub">${p.inbound_body} in body</span></td>
       <td>${p.best_keyword ? `${esc(p.best_keyword)} <span class="muted small">${p.best_score}</span>` : "–"}</td>
       <td>${p.flags.map(f => `<span class="badge ${f.level}">${esc(f.label)}</span>`).join("") || "–"}</td></tr>`).join("")
       || `<tr><td colspan="7" class="muted">No pages match.</td></tr>`;
@@ -204,13 +206,126 @@
       <div class="bars">${a.depth.map(d => `<div class="barrow"><span>${d.depth === "Not linked" ? "Not linked" : "Depth " + d.depth}</span><i><b style="width:${d.count / max * 100}%"></b></i><span>${d.count}</span></div>`).join("")}</div>
       <div class="cols">
         <div><h3>Page types</h3>${tbl(["Type", "Pages", "Examples"], a.page_types.map(t => `<tr><td>${esc(t.type)}</td><td>${t.count}</td><td class="path">${t.examples.slice(0, 3).map(e => link(e.url, e.path)).join("<br>")}</td></tr>`).join(""))}</div>
-        <div><h3>Sections</h3>${tbl(["Section", "Pages", "Avg words", "Avg links in"], a.sections.map(s => `<tr><td>${esc(s.section)}</td><td>${s.count}</td><td>${s.avg_words}</td><td>${s.avg_inbound}</td></tr>`).join(""))}</div>
+        <div><h3>Sections</h3>${tbl(["Section", "Pages", "Avg words", "Links in (all)", "Links in (body)"], a.sections.map(s => `<tr><td>${esc(s.section)}</td><td>${s.count}</td><td>${s.avg_words}</td><td>${s.avg_inbound}</td><td>${s.avg_inbound_body}</td></tr>`).join(""))}</div>
       </div>
       <div class="cols">
-        <div><h3>Most linked pages</h3>${tbl(["Page", "Links in"], a.most_linked.map(p => `<tr><td class="path">${link(p.url, p.path)}</td><td>${p.inbound}</td></tr>`).join(""))}</div>
+        <div><h3>Most linked pages</h3>${tbl(["Page", "Links in", "From body"], a.most_linked.map(p => `<tr><td class="path">${link(p.url, p.path)}</td><td>${p.inbound}</td><td>${p.inbound_body}</td></tr>`).join(""))}</div>
         <div><h3>Orphan pages</h3>${a.orphans.length ? tbl(["Page"], a.orphans.map(p => `<tr><td class="path">${link(p.url, p.path)}</td></tr>`).join("")) : `<p class="muted">None found. Every sitemap page is linked from another page.</p>`}</div>
       </div>`;
   }
+
+  // ---------------------------------------------------------------- content plan
+  const piece = (head, text, meta = "") => `<div class="piece"><div class="phead"><b>${esc(head)}</b><span class="meta">${meta}</span><button type="button" class="ghost" data-copy>Copy</button></div><pre>${esc(text)}</pre></div>`;
+  const watch = w => (w && w.length) ? `<span class="badge warn">Reword: ${esc(w.join(", "))}</span>` : "";
+  const cc = (n, max) => `<span class="badge ${n > max ? "bad" : "note"}">${n}/${max}</span>`;
+  const CH = [["gbp", "Google Business Profile"], ["faq", "FAQs"], ["quora", "Quora"], ["reddit", "Reddit"], ["linkedin", "LinkedIn"], ["facebook", "Facebook"], ["pinterest", "Pinterest"]];
+
+  document.addEventListener("click", e => {
+    const b = e.target.closest("[data-copy]");
+    if (!b) return;
+    navigator.clipboard.writeText(b.closest(".piece").querySelector("pre").textContent).then(() => {
+      b.textContent = "Copied"; setTimeout(() => (b.textContent = "Copy"), 1200);
+    });
+  });
+
+  function buildContentPanel(d) {
+    const brand = d.facts.brand || "";
+    $("#panel-content").innerHTML = `
+      <h3>Who owns each keyword</h3><div id="ecoBox"></div>
+      <h3>Where to work, and what is worth your time</h3>
+      <div class="inline"><label>Business type
+        <select id="ctype"><option value="local">Local business with customers in an area</option><option value="online">Online business or content site</option></select></label>
+        <label>Country <select id="ccountry"><option>India</option><option>USA</option><option>UK</option><option>Canada</option><option value="">Other</option></select></label></div>
+      <div id="playBox"></div>
+      <h3>Write the content</h3>
+      ${CFG.ai_enabled ? "" : `<p class="alert">AI writing is switched off. Add <b>ANTHROPIC_API_KEY</b> in your server settings to enable it. The map and playbook above work without it.</p>`}
+      <form id="cform" class="cform" novalidate>
+        <div class="inline">
+          <label>Business name <input id="cname" value="${esc(brand)}"></label>
+          <label>City or area <input id="ccity" placeholder="Madurai"></label>
+        </div>
+        <div class="inline">
+          <label>Tone <select id="ctone"><option value="friendly">Friendly</option><option value="traditional">Warm and traditional</option><option value="professional">Professional</option><option value="direct">Direct and practical</option></select></label>
+          <label>Language <input id="clang" value="English"></label>
+        </div>
+        <label>Facts the writer can use <span class="hint">strongly recommended: years in business, specialties, areas served, prices, what makes you different</span>
+          <textarea id="cfacts" rows="4" placeholder="Family-run since 1998. Pure vegetarian. We serve Madurai and nearby towns. Weddings from 100 to 3000 guests."></textarea></label>
+        <fieldset><legend>Channels</legend>${CH.map(([id, l]) => `<label class="check"><input type="checkbox" name="ch" value="${id}" ${["gbp", "faq"].includes(id) ? "checked" : ""}> ${l}</label>`).join("")}</fieldset>
+        <button type="submit" class="primary" id="cgo" ${CFG.ai_enabled ? "" : "disabled"}>Write content</button>
+        <span id="cmsg" class="muted small"></span>
+      </form>
+      <div id="cout"></div>`;
+    $("#ctype").addEventListener("change", loadPlan);
+    $("#ccountry").addEventListener("change", loadPlan);
+    $("#cform").addEventListener("submit", e => { e.preventDefault(); writeContent(); });
+    loadPlan();
+  }
+
+  async function loadPlan() {
+    const r = await fetch(`/api/plan/${jobId}?type=${$("#ctype").value}&country=${encodeURIComponent($("#ccountry").value)}`, { headers: headers() });
+    if (!r.ok) return;
+    const p = await r.json();
+    $("#ecoBox").innerHTML = `<div class="tablewrap"><table><thead><tr><th>Keyword</th><th>Verdict</th><th>Owner page</th><th>Link to it from</th><th>GBP posts and FAQ go to</th></tr></thead><tbody>${p.ecosystem.map(r => `<tr>
+      <td>${esc(r.keyword)}<span class="sub">${esc(r.intent)} intent</span></td><td>${esc(r.decision)}</td>
+      <td class="path">${r.has_owner ? link(r.owner, new URL(r.owner).pathname) : `<b>${esc(r.owner)}</b><span class="sub">Title: ${esc(r.suggested_title)}</span>`}</td>
+      <td class="path">${r.link_from.length ? r.link_from.map(esc).join("<br>") : "–"}</td>
+      <td class="path">${r.has_owner ? link(r.gbp_links_to, new URL(r.gbp_links_to).pathname) : esc(r.faq_goes_on)}</td></tr>`).join("")}</tbody></table></div>`;
+    $("#playBox").innerHTML = p.playbook.map(x => `<details class="issue"><summary><span class="badge ${/Start/.test(x.priority) ? "good" : /Skip|Low/.test(x.priority) ? "note" : "warn"}">${esc(x.priority)}</span><span>${esc(x.name)}</span><span class="n">${esc(x.cadence)}</span></summary>
+      <div class="body"><p class="fix"><b>Why:</b> ${esc(x.role)}</p><p><b>What to do:</b> ${esc(x.what)}</p><p><b>SEO honesty:</b> ${esc(x.seo_note)}</p>
+      <ul>${x.do.map(t => `<li>Do: ${esc(t)}</li>`).join("")}${x.dont.map(t => `<li>Avoid: ${esc(t)}</li>`).join("")}</ul></div></details>`).join("");
+  }
+
+  async function writeContent() {
+    const channels = [...document.querySelectorAll('input[name="ch"]:checked')].map(i => i.value);
+    if (!channels.length) { $("#cmsg").textContent = "Pick at least one channel."; return; }
+    $("#cgo").disabled = true; $("#cmsg").textContent = "Starting"; $("#cout").innerHTML = "";
+    const body = { job_id: jobId, channels, business_name: $("#cname").value, city: $("#ccity").value, country: $("#ccountry").value,
+      tone: $("#ctone").value, language: $("#clang").value, extra_facts: $("#cfacts").value };
+    try {
+      const r = await fetch("/api/content", { method: "POST", headers: headers(), body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Could not start writing.");
+      cJob = d.job_id;
+      cTimer = setInterval(pollContent, 1500);
+    } catch (e) { $("#cmsg").textContent = e.message; $("#cgo").disabled = !CFG.ai_enabled; }
+  }
+
+  async function pollContent() {
+    try {
+      const r = await fetch("/api/jobs/" + cJob, { headers: headers() });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Lost the writing job.");
+      $("#cmsg").textContent = d.message || "";
+      if (d.result) renderContent(d.result);
+      if (["complete", "failed", "cancelled"].includes(d.status)) { clearInterval(cTimer); $("#cgo").disabled = !CFG.ai_enabled; if (d.status === "failed") $("#cmsg").textContent = d.message; }
+    } catch (e) { clearInterval(cTimer); $("#cmsg").textContent = e.message; $("#cgo").disabled = !CFG.ai_enabled; }
+  }
+
+  function renderContent(res) {
+    const out = [];
+    CH.forEach(([id, label]) => {
+      if (res.errors[id]) { out.push(`<section class="chan"><h3>${label}</h3><p class="error">${esc(res.errors[id])}</p></section>`); return; }
+      const d = res.channels[id];
+      if (!d) return;
+      out.push(`<section class="chan"><h3>${label}</h3>${RENDER[id](d)}</section>`);
+    });
+    $("#cout").innerHTML = out.join("");
+  }
+
+  const posts = d => d.posts.map(p => piece(p.title, p.text + (p.cta ? `\n\nCall to action: ${p.cta}` : ""), watch(p.watch)) + (p.image_idea ? `<p class="muted small">Image: ${esc(p.image_idea)}</p>` : "")).join("");
+  const RENDER = {
+    gbp: d => `<h4>Business description ${cc(d.description.chars, 750)} ${watch(d.description.watch)}</h4>${piece("Description", d.description.text)}
+      <h4>Posts</h4>${d.posts.map(p => piece(`${p.type}: ${p.topic}`, p.text, `${cc(p.chars, 1500)} ${watch(p.watch)}`) + `<p class="muted small">Button: ${esc(p.cta)}. Link to ${link(p.link_to, new URL(p.link_to).pathname)}. Photo: ${esc(p.photo_idea)}</p>`).join("")}
+      <h4>Services to add to the profile</h4>${d.services.map(s => piece(s.name, s.description, cc(s.chars, 300))).join("")}
+      ${d.photo_ideas.length ? `<h4>Photos to upload</h4><ul class="list">${d.photo_ideas.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}`,
+    faq: d => d.groups.map(g => `<h4>${esc(g.keyword)} <span class="muted small">put on ${link(g.page, new URL(g.page).pathname)}</span></h4>${g.faqs.map(f => piece(f.q, f.a, watch(f.watch))).join("")}`).join("")
+      + `<h4>FAQ schema (JSON-LD)</h4><p class="muted small">Paste into the page. Google now shows FAQ rich results mainly for government and health sites, so the benefit is clarity for search engines and AI tools, not a guaranteed rich result.</p>${piece("FAQPage markup", d.jsonld)}`,
+    quora: d => d.items.map(i => piece(i.question, i.answer + (i.mention ? `\n\n${i.mention}` : ""), watch(i.watch)) + `<p class="muted small">Find it: ${esc(i.search_tip)}</p>`).join(""),
+    reddit: d => `<p class="alert">Reddit communities remove promotion fast. Use these to join conversations, not to advertise.</p>${d.posts.map(p => piece(p.title, p.body, esc(p.type) + " " + watch(p.watch))).join("")}
+      <h4>Where to look</h4><ul class="list">${d.where.map(x => `<li>${esc(x)}</li>`).join("")}</ul><h4>Searches to find threads you can help with</h4><ul class="list">${d.listening.map(x => `<li>${esc(x)}</li>`).join("")}</ul>`,
+    linkedin: posts, facebook: posts,
+    pinterest: d => d.pins.map(p => piece(p.title, p.description + `\nBoard: ${p.board}`, `${cc(p.title.length, 100)} ${cc(p.description.length, 500)} ${watch(p.watch)}`) + `<p class="muted small">Image: ${esc(p.image_idea)}. Link to ${link(p.link_to, new URL(p.link_to).pathname)}</p>`).join(""),
+  };
 
   // ---------------------------------------------------------------- downloads
   function csvCell(v) {

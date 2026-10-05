@@ -297,8 +297,16 @@ def parse_page(res, requested, base_key):
     schema = _schema_types(soup)
 
     internal, external = [], 0
+    tels, mails = set(), set()
+    footer_tag = soup.find("footer")
+    footer_text = re.sub(r"\s+", " ", footer_tag.get_text(" ", strip=True))[:400] if footer_tag else ""
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
+        low = href.lower()
+        if low.startswith("tel:"):
+            tels.add(href[4:].strip())
+        elif low.startswith("mailto:"):
+            mails.add(href[7:].split("?")[0].strip())
         if not href or href.startswith(("mailto:", "tel:", "javascript:", "#", "sms:", "data:")):
             continue
         target = normalize_url(href, final)
@@ -331,7 +339,8 @@ def parse_page(res, requested, base_key):
         "canonical": canonical, "robots_meta": robots_meta,
         "noindex": "noindex" in robots_meta.lower() or "noindex" in res.get("x_robots", "").lower(),
         "lang": (soup.html.get("lang") if soup.html else "") or "",
-        "og_type": meta(prop="og:type"), "schema": schema,
+        "og_type": meta(prop="og:type"), "og_site_name": meta(prop="og:site_name"), "schema": schema,
+        "tels": sorted(tels)[:3], "mails": sorted(mails)[:3], "footer_text": footer_text,
         "word_count": len(words), "text": text[:TEXT_CAP],
         "text_hash": hashlib.sha1(norm_text.encode()).hexdigest() if len(words) >= 50 else "",
         "images": len(imgs), "images_no_alt": images_no_alt,

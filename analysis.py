@@ -49,14 +49,18 @@ FIELD_W = {"title": 3.0, "h1": 3.0, "url": 2.5, "meta": 1.5, "h2": 1.5, "body": 
 PHRASE_W = {"title": 1.0, "h1": 1.0, "url": 0.8, "h2": 0.7, "meta": 0.6}
 
 
-def score_page(kt, idx):
-    """0-100 relevance of one page to one keyword, plus where the keyword appears."""
+def score_page(kt, idx, wm=None):
+    """0-100 relevance of one page to one keyword, plus where the keyword appears.
+    wm down-weights words that appear on almost every page of the site (e.g. the city name)."""
+    wm = wm or {}
+    tw = [wm.get(t, 1.0) for t in kt]
+    tot = sum(tw)
     cov_total = 0.0
     found = {}
     for f, w in FIELD_W.items():
-        present = sum(1 for t in kt if t in idx["sets"][f]) / len(kt)
+        present = sum(x for t, x in zip(kt, tw) if t in idx["sets"][f]) / tot
         cov_total += w * present
-        found[f] = present == 1.0
+        found[f] = all(t in idx["sets"][f] for t in kt)
     cov = cov_total / sum(FIELD_W.values())
 
     phrase = 0.0
@@ -67,7 +71,7 @@ def score_page(kt, idx):
     phrase = max(phrase, min(1.0, body_hits / 3) * 0.5)
     found["body_count"] = body_hits
 
-    tf = sum(idx["body_counts"][t] / (idx["body_counts"][t] + 3) for t in kt) / len(kt)
+    tf = sum(x * idx["body_counts"][t] / (idx["body_counts"][t] + 3) for t, x in zip(kt, tw)) / tot
     return round(100 * (0.45 * cov + 0.35 * phrase + 0.20 * tf)), found
 
 
@@ -81,20 +85,28 @@ SERVICE = {"service", "services", "solution", "solutions", "product", "products"
            "courses", "pricing", "shop", "offering", "consulting", "packages"}
 
 
-def classify(p, n_links):
+ARCHIVE = {"author", "tag", "tags", "category", "categories", "page", "feed"}
+
+
+def classify(p, n_links, home_out):
     path = unquote(p["path"]).lower()
     if path == "/":
         return "Home"
-    toks = set(re.split(r"[^a-z0-9]+", path))
-    schema = set(p["schema"])
-    if toks & UTILITY:
+    segs = [x for x in path.split("/") if x]
+    first = set(re.split(r"[^a-z0-9]+", segs[0]))
+    allt = set(re.split(r"[^a-z0-9]+", path))
+    if segs[0] in ARCHIVE:
+        return "Archive / Listing"
+    if first & BLOG:
+        return "Blog / Article" if len(segs) > 1 else "Category / Listing"
+    if len(segs) <= 2 and first & UTILITY:
         return "Company / Utility"
-    if toks & BLOG or schema & {"Article", "BlogPosting", "NewsArticle"} or p["og_type"] == "article":
-        return "Blog / Article"
-    if "case-stud" in path or "portfolio" in toks:
+    if "case-stud" in path or "portfolio" in allt:
         return "Case Study"
-    if toks & SERVICE or schema & {"Product", "Service", "Course", "Offer"}:
+    if allt & SERVICE or set(p["schema"]) & {"Product", "Service", "Course", "Offer"}:
         return "Service / Product"
+    if len(segs) == 1 and p["url"] in home_out and p["word_count"] >= 300:
+        return "Service / Product"   # heuristic: a substantial top-level page linked from the homepage
     if n_links >= 40 and p["word_count"] < 400:
         return "Category / Listing"
     return "Other"
@@ -154,11 +166,13 @@ def analyze(data, keywords):
                 if in_body:
                     in_ctx[t].add(p["url"])
         p["_out"] = out
+    home0 = by_url.get(data["root"]) or pages[0]
+    home_out = home0["_out"]
     for p in pages:
         p["inbound"] = len(in_all[p["url"]])
         p["inbound_body"] = len(in_ctx[p["url"]])
         p["outbound"] = len(p["_out"])
-        p["page_type"] = classify(p, len(p["links_internal"]))
+        p["page_type"] = classify(p, len(p["links_internal"]), home_out)
         p["_idx"] = build_index(p)
         p["flags"] = []
 
@@ -185,7 +199,7 @@ def analyze(data, keywords):
     dup_title, dup_meta, dup_text = defaultdict(list), defaultdict(list), defaultdict(list)
     for p in pages:
         u = p["url"]
-        is_utility = p["page_type"] in ("Company / Utility", "Category / Listing")
+        is_utility = p["page_type"] in ("Company / Utility", "Category / Listing", "Archive / Listing")
         if not p["title"]:
             issue("no_title", "high", "On-page", "Missing title tag",
                   "Add a unique, descriptive title that includes the page's main keyword.", u)
@@ -329,11 +343,15 @@ def analyze(data, keywords):
 
     # ---- keyword decisions
     mappings = []
+    df = Counter()
+    for p in pages:
+        df.update(set().union(*p["_idx"]["sets"].values()))
+    wm = {t: 1 - 0.85 * (n / len(pages)) ** 2 for t, n in df.items()}
     for kw in keywords:
         kt = tokens(kw) or tokens(kw, keep_stop=True)
         scored = []
         for p in pages:
-            s, found = score_page(kt, p["_idx"])
+            s, found = score_page(kt, p["_idx"], wm)
             p.setdefault("keyword_scores", {})[kw] = s
             scored.append((s, found, p))
         scored.sort(key=lambda x: (-x[0], -x[2]["inbound"]))
@@ -358,11 +376,12 @@ def analyze(data, keywords):
                        for t, v in sorted(types.items(), key=lambda kv: -len(kv[1]))],
         "sections": [{"section": s, "count": len(v),
                       "avg_words": round(sum(x["word_count"] for x in v) / len(v)),
-                      "avg_inbound": round(sum(x["inbound"] for x in v) / len(v), 1)}
+                      "avg_inbound": round(sum(x["inbound"] for x in v) / len(v), 1),
+                      "avg_inbound_body": round(sum(x["inbound_body"] for x in v) / len(v), 1)}
                      for s, v in sorted(sections.items(), key=lambda kv: -len(kv[1]))[:20]],
         "depth": [{"depth": k, "count": v} for k, v in sorted(
             depth_counts.items(), key=lambda kv: (kv[0] == "Not linked", kv[0] if kv[0] != "Not linked" else 0))],
-        "most_linked": [{"url": p["url"], "path": p["path"], "inbound": p["inbound"], "title": p["title"]}
+        "most_linked": [{"url": p["url"], "path": p["path"], "inbound": p["inbound"], "inbound_body": p["inbound_body"], "title": p["title"]}
                         for p in sorted(pages, key=lambda x: -x["inbound"])[:10]],
         "orphans": [{"url": p["url"], "path": p["path"]} for p in pages
                     if p["depth"] is None and not in_all[p["url"]]][:50],
@@ -402,7 +421,9 @@ def analyze(data, keywords):
             "flags": p["flags"], "response_ms": p["elapsed_ms"],
         })
 
+    facts = build_facts(pages, by_url, home, mappings, brand, base_key)
     return {
+        "facts": facts,
         "site": {"url": data["root"], "domain": base_key,
                  "analyzed_at": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())},
         "summary": summary, "stats": stats,
@@ -422,10 +443,31 @@ def _healthy(p):
     return not p["noindex"] and canon == p["url"] and p["word_count"] >= 300
 
 
+def build_facts(pages, by_url, home, mappings, brand, base_key):
+    """What the site itself says. The AI writer may only use these facts."""
+    def item(p, n):
+        return {"url": p["url"], "path": p["path"], "title": p["title"], "h1": " | ".join(p["h1"][:2]),
+                "h2": p["h2"][:8], "excerpt": p["text"][:n]}
+    kwp = {}
+    for m in mappings:
+        u = (m["target"] or m["closest"])["url"]
+        kwp[m["keyword"]] = item(by_url[u], 700)
+    return {
+        "brand": home["og_site_name"] or brand or base_key,
+        "home": {**item(home, 900), "meta": home["meta"]},
+        "services": [item(p, 350) for p in pages if p["page_type"] == "Service / Product"][:12],
+        "keyword_pages": kwp,
+        "contact": {"phones": home["tels"], "emails": home["mails"], "footer": home["footer_text"]},
+    }
+
+
 def keyword_report(kw, kt, scored, brand, by_url):
     intent = intent_of(kw)
     best_s, best_found, best = scored[0]
-    second = scored[1] if len(scored) > 1 else None
+    rivals = [x for x in scored[1:] if best["page_type"] != "Home" and x[2]["page_type"] != "Home"]
+    second = rivals[0] if rivals else None
+    home_overlap = best["page_type"] == "Home" and any(x[0] >= 40 and x[0] >= best_s * 0.85 for x in scored[1:])
+    owner_url = None
     title_case = " ".join(w.capitalize() if w.islower() else w for w in kw.split())
     suggested_title = f"{title_case} | {brand}" if brand and len(title_case) + len(brand) + 3 <= 60 else title_case
 
@@ -482,9 +524,10 @@ def keyword_report(kw, kt, scored, brand, by_url):
         if decision == "STRONG" and not actions:
             actions.append("Well targeted. Keep it fresh and keep internal links pointing here.")
         if decision == "CANNIBALIZATION":
-            cands = [(s, p) for s, _f, p in scored[:4] if s >= 40]
+            cands = [(s, p) for s, _f, p in scored[:6] if s >= 40 and p["page_type"] != "Home"][:4]
             competing = [{"url": p["url"], "path": p["path"], "score": s, "inbound": p["inbound"]} for s, p in cands]
             primary = max(cands, key=lambda c: c[0] + min(10, c[1]["inbound"]))[1]
+            owner_url = primary["url"]
             actions.insert(0, f"{len(cands)} pages compete for “{kw}”. Suggested primary page: {primary['path']}. "
                               "Merge the others into it, differentiate their focus, or point their canonical at it, "
                               "then update internal links.")
@@ -496,6 +539,11 @@ def keyword_report(kw, kt, scored, brand, by_url):
         warnings.append(f"This keyword looks {INTENT_LABEL[intent].lower()}, but the best match is a {page_type} page. "
                         f"A {want} page may fit the search intent better.")
 
+    if home_overlap:
+        warnings.append("The homepage and a more specific page both match this broad keyword. That is normal: "
+                        "keep the homepage general and make the specific page focus on its own topic.")
+    if decision in ("OPTIMIZE", "STRONG"):
+        owner_url = best["url"]
     labels = {"CREATE": "Create a new page", "OPTIMIZE": "Optimize existing page",
               "STRONG": "Well targeted", "CANNIBALIZATION": "Pages compete"}
     headings = []
@@ -504,7 +552,7 @@ def keyword_report(kw, kt, scored, brand, by_url):
             if h and h not in headings:
                 headings.append(h)
     return {
-        "keyword": kw, "intent": INTENT_LABEL[intent], "decision": decision,
+        "keyword": kw, "intent": INTENT_LABEL[intent], "decision": decision, "owner_url": owner_url,
         "decision_label": labels[decision], "score": best_s,
         "target": None if decision == "CREATE" else {
             "url": best["url"], "path": best["path"], "title": best["title"], "page_type": page_type,
