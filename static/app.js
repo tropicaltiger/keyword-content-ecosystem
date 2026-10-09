@@ -91,6 +91,8 @@
     $("#panel-structure").innerHTML = structure(d.architecture);
     $("#jsonbox").textContent = JSON.stringify(d, null, 2);
     buildContentPanel(d);
+    buildCompetitorsPanel(d);
+    buildLinksPanel();
     showTab("keywords");
     window.scrollTo({ top: 0 });
   }
@@ -163,11 +165,25 @@
   // ---------------------------------------------------------------- pages table
   const COLS = [
     ["path", "Page"], ["page_type", "Type"], ["word_count", "Words", true], ["depth", "Depth", true],
-    ["inbound", "Links in", true], ["best_score", "Best keyword", true], ["flags", "Flags"],
+    ["inbound", "Links in", true], ["weight_kb", "Size"], ["best_score", "Best keyword", true], ["flags", "Flags"],
   ];
 
+  const fmtKB = kb => kb >= 1024 ? (kb / 1024).toFixed(1) + " MB" : kb + " KB";
+  function sizeCell(p) {
+    const s = p.size;
+    if (!s || !s.weight_kb) return "–";
+    const n = s.problems.length, worst = s.problems.some(x => x.severity === "high") ? "bad" : "warn";
+    return `<details class="szd"><summary>${fmtKB(s.weight_kb)}${n ? ` <span class="badge ${worst}">${n} issue${n === 1 ? "" : "s"}</span>` : ""}</summary>
+      <p class="small muted">HTML ${fmtKB(s.html_kb)}. Found ${s.counts.images} images, ${s.counts.scripts} scripts, ${s.counts.styles} stylesheets.${s.unmeasured ? ` ${s.unmeasured} files had no size information.` : ""}${s.measured ? "" : " Files were not measured."}</p>
+      ${n ? `<ul class="list">${s.problems.map(x => `<li><b>${esc(x.title)}</b> (${esc(x.detail)}). ${esc(x.fix)}</li>`).join("")}</ul>` : `<p class="small">No size problems found.</p>`}
+      ${s.savings_kb ? `<p class="small"><b>Could be reduced by roughly ${fmtKB(s.savings_kb)}</b> (a rough estimate).</p>` : ""}
+      ${s.heavy_files.length ? `<p class="small muted">Heaviest files:</p><ul class="list small">${s.heavy_files.map(f => `<li>${fmtKB(f.kb)}, ${esc(f.kind)}: ${link(f.url, f.url.replace(/^https?:\/\/[^/]+/, "").slice(0, 70) || f.url)}</li>`).join("")}</ul>` : ""}</details>`;
+  }
+
   function pagesShell() {
-    return `<input id="pf" class="filter" type="search" placeholder="Filter by URL, title or type" aria-label="Filter pages">
+    const st = DATA.stats;
+    return `<p class="muted small">Size is approximate: the page's HTML plus the images, scripts and stylesheets found in it (up to 250 files measured per crawl).${st.est_savings_kb ? ` Across the site, roughly <b>${fmtKB(st.est_savings_kb)}</b> could be saved. ${st.heavy_pages} page(s) are over 3 MB.` : ""} Open a size to see what is wrong and how to fix it.</p>
+      <input id="pf" class="filter" type="search" placeholder="Filter by URL, title or type" aria-label="Filter pages">
       <div class="tablewrap"><table><thead><tr>${COLS.map(([k, label, num]) =>
         `<th class="${num ? "num" : ""}">${k === "flags" ? label : `<button type="button" data-sort="${k}">${label}</button>`}</th>`).join("")}</tr></thead>
       <tbody id="pbody"></tbody></table></div>`;
@@ -191,10 +207,10 @@
     $("#pbody").innerHTML = rows.map(p => `<tr>
       <td class="path">${link(p.url, p.path)}<span class="sub">${esc(p.title || "(no title)")}</span></td>
       <td>${esc(p.page_type)}</td><td class="num">${p.word_count}</td>
-      <td class="num">${p.depth ?? "–"}</td><td class="num">${p.inbound}<span class="sub">${p.inbound_body} in body</span></td>
+      <td class="num">${p.depth ?? "–"}</td><td class="num">${p.inbound}<span class="sub">${p.inbound_body} in body</span></td><td>${sizeCell(p)}</td>
       <td>${p.best_keyword ? `${esc(p.best_keyword)} <span class="muted small">${p.best_score}</span>` : "–"}</td>
       <td>${p.flags.map(f => `<span class="badge ${f.level}">${esc(f.label)}</span>`).join("") || "–"}</td></tr>`).join("")
-      || `<tr><td colspan="7" class="muted">No pages match.</td></tr>`;
+      || `<tr><td colspan="8" class="muted">No pages match.</td></tr>`;
   }
 
   // ---------------------------------------------------------------- structure
@@ -326,6 +342,140 @@
     linkedin: posts, facebook: posts,
     pinterest: d => d.pins.map(p => piece(p.title, p.description + `\nBoard: ${p.board}`, `${cc(p.title.length, 100)} ${cc(p.description.length, 500)} ${watch(p.watch)}`) + `<p class="muted small">Image: ${esc(p.image_idea)}. Link to ${link(p.link_to, new URL(p.link_to).pathname)}</p>`).join(""),
   };
+
+  // ---------------------------------------------------------------- competitors
+  const table = (head, rows) => `<div class="tablewrap"><table><thead><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  const mapsLink = k => "https://www.google.com/maps/search/" + encodeURIComponent(k);
+  const GBP_CHECK = ["Main category and extra categories (are rivals more specific?)", "Number of reviews, rating, and how recent the latest reviews are", "Whether the owner replies to reviews", "Services or products listed, with descriptions", "A clear, complete business description", "Number and quality of photos, and how recent they are", "How often they post updates or offers", "Opening hours, booking link and website link"];
+  let compJob = null, compTimer = null, LAST_GAP = null;
+
+  function buildCompetitorsPanel(d) {
+    $("#panel-competitors").innerHTML = `
+      <h3>Compare competitor websites</h3>
+      <p class="muted">Add up to three competitors. Each is crawled (up to 30 pages) and checked against your keywords.</p>
+      <form id="compform" class="cform"><div class="inline">${[1, 2, 3].map(n => `<label>Competitor ${n}<input id="comp${n}" placeholder="competitor${n}.com"></label>`).join("")}</div>
+        <div><button type="submit" class="primary" id="compgo">Compare</button> <span id="compmsg" class="muted small"></span></div></form>
+      <div id="compOut"></div>
+
+      <h3>Backlink gap</h3>
+      <p class="muted">Backlinks cannot be found by crawling, because they live in paid indexes. Instead, export each competitor's backlinks from a tool you have access to (the free backlink checkers from Ahrefs, Semrush or Moz show a limited list, which is enough to start) and paste or upload it here. Your own export is optional, and Google Search Console's Links report gives it free. The tool then shows sites that link to competitors but not to you.</p>
+      <form id="blform" class="cform">
+        <label>Your backlinks (optional) <textarea id="bl-you" rows="3" placeholder="Paste a CSV export, or just a list of URLs, one per line"></textarea><input type="file" data-fill="bl-you" accept=".csv,.txt"></label>
+        <div class="inline">${[1, 2, 3].map(n => `<label>Competitor ${n} backlinks<textarea id="bl-c${n}" rows="4"></textarea><input type="file" data-fill="bl-c${n}" accept=".csv,.txt"></label>`).join("")}</div>
+        <div><button type="submit" class="primary">Find link gaps</button> <span id="blmsg" class="muted small"></span></div></form>
+      <div id="blOut"></div>
+
+      <h3>Google Business Profile competition</h3>
+      <div id="gbpBox">
+        ${CFG.gbp_enabled ? `<form id="gbpform" class="cform"><label>Your business name on Google <span class="hint">helps find your listing in the results</span><input id="gbpname" value="${esc(d.facts.brand || "")}"></label>
+          <div><button type="submit" class="primary">Check Google Business Profile competition</button> <span id="gbpmsg" class="muted small"></span></div></form>`
+          : `<p class="alert">Automatic checks are off. They use Google's official Places API, which needs a <b>GOOGLE_PLACES_API_KEY</b> in your server settings. You can still compare by hand below.</p>`}
+        <div id="gbpOut"></div>
+        <h4>Compare by hand</h4>
+        <ul class="list">${d.keywords.map(k => `<li>${link(mapsLink(k.keyword), "Search Google Maps for “" + k.keyword + "”")}</li>`).join("")}</ul>
+        <p class="muted small">For the top three results, compare:</p><ul class="list small">${GBP_CHECK.map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+      </div>`;
+    $("#compform").addEventListener("submit", e => { e.preventDefault(); startCompare(); });
+    $("#blform").addEventListener("submit", e => { e.preventDefault(); findGaps(); });
+    document.querySelectorAll("[data-fill]").forEach(i => i.addEventListener("change", () => {
+      const f = i.files[0]; if (!f) return;
+      if (f.size > 1.5e6) { $("#blmsg").textContent = "That file is too large (limit 1.5 MB)."; return; }
+      f.text().then(t => { $("#" + i.dataset.fill).value = t; });
+    }));
+    if ($("#gbpform")) $("#gbpform").addEventListener("submit", e => { e.preventDefault(); checkGbp(); });
+  }
+
+  async function startCompare() {
+    const urls = [1, 2, 3].map(n => $("#comp" + n).value.trim()).filter(Boolean);
+    if (!urls.length) { $("#compmsg").textContent = "Enter at least one competitor."; return; }
+    $("#compgo").disabled = true; $("#compmsg").textContent = "Starting"; $("#compOut").innerHTML = "";
+    try {
+      const r = await fetch("/api/competitors", { method: "POST", headers: headers(), body: JSON.stringify({ job_id: jobId, urls }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Could not start.");
+      compJob = d.job_id; compTimer = setInterval(pollComp, 1500);
+    } catch (e) { $("#compmsg").textContent = e.message; $("#compgo").disabled = false; }
+  }
+
+  async function pollComp() {
+    try {
+      const r = await fetch("/api/jobs/" + compJob, { headers: headers() });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Lost the comparison job.");
+      $("#compmsg").textContent = d.message || "";
+      if (d.result) renderComp(d.result);
+      if (["complete", "failed", "cancelled"].includes(d.status)) { clearInterval(compTimer); $("#compgo").disabled = false; }
+    } catch (e) { clearInterval(compTimer); $("#compmsg").textContent = e.message; $("#compgo").disabled = false; }
+  }
+
+  function renderComp(res) {
+    $("#compOut").innerHTML = Object.entries(res.errors).map(([u, m]) => `<p class="error">${esc(u)}: ${esc(m)}</p>`).join("") + res.competitors.map(c => `
+      <article class="kw optimize"><div class="kw-head"><h3>${esc(c.domain)}</h3><span class="intent">${c.pages} pages${c.crawl_limited ? " (crawl limited)" : ""}</span></div>
+        <p class="muted small">Average ${c.avg_words} words per page. ${c.blog_posts} blog posts. FAQ markup on ${c.has_faq_schema} pages. LocalBusiness markup on ${c.has_local_schema} pages.</p>
+        <h4>Their best page for each of your keywords</h4>
+        ${table(["Keyword", "Verdict", "Their page", "Their words", "Your page", "Your words"], c.keywords.map(k => `<tr><td>${esc(k.keyword)}</td>
+          <td><span class="badge ${k.verdict.startsWith("Their") ? "bad" : k.verdict.startsWith("Your") ? "good" : "note"}">${esc(k.verdict)}</span><span class="sub">${k.their_score} vs ${k.your_score}</span></td>
+          <td class="path">${link(k.their_url, k.their_path)}<span class="sub">${esc(k.their_title)}</span></td><td>${k.their_words}</td><td class="path">${esc(k.your_path)}</td><td>${k.your_words}</td></tr>`).join(""))}
+        ${c.topics_you_lack.length ? `<details><summary>Topics they cover that your site does not (${c.topics_you_lack.length})</summary><ul class="list">${c.topics_you_lack.map(t => `<li>${link(t.url, t.title || t.url)} <span class="muted small">${t.words} words</span></li>`).join("")}</ul></details>` : ""}
+      </article>`).join("");
+  }
+
+  async function findGaps() {
+    const comps = [1, 2, 3].map(n => ({ name: ($("#comp" + n)?.value.trim() || "Competitor " + n).replace(/^https?:\/\//, "").replace(/\/.*$/, ""), csv: $("#bl-c" + n).value })).filter(c => c.csv.trim());
+    $("#blmsg").textContent = "Working";
+    try {
+      const r = await fetch("/api/backlinks", { method: "POST", headers: headers(), body: JSON.stringify({ job_id: jobId, yours: $("#bl-you").value, competitors: comps }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Could not read the exports.");
+      LAST_GAP = d; $("#blmsg").textContent = "";
+      $("#blOut").innerHTML = `<p class="lead">${d.total} sites link to your competitors but not to you. Showing the top ${d.prospects.length}, ordered by how many competitors they link to.</p>
+        <p class="muted small">Sites read: ${Object.entries(d.competitor_domains).map(([n, c]) => `${esc(n)} (${c})`).join(", ")}${d.yours ? `, you (${d.yours})` : ""}. <button type="button" class="ghost" id="dlGap">Download CSV</button></p>
+        ${table(["Site", "Links to", "Type", "How to approach"], d.prospects.map(p => `<tr><td class="path">${link("https://" + p.domain, p.domain)}</td><td>${p.count}: ${p.linked_to.map(esc).join(", ")}</td><td>${esc(p.kind)}</td><td>${esc(p.ease)}</td></tr>`).join(""))}`;
+      $("#dlGap").addEventListener("click", () => download("backlink-gap.csv", toCsv([["domain", "competitors_linked", "linked_to", "type", "approach"], ...LAST_GAP.prospects.map(p => [p.domain, p.count, p.linked_to.join("; "), p.kind, p.ease])]), "text/csv"));
+    } catch (e) { $("#blmsg").textContent = e.message; }
+  }
+
+  async function checkGbp() {
+    $("#gbpmsg").textContent = "Asking Google";
+    try {
+      const r = await fetch("/api/gbp", { method: "POST", headers: headers(), body: JSON.stringify({ job_id: jobId, business_name: $("#gbpname").value }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Google check failed.");
+      $("#gbpmsg").textContent = "";
+      $("#gbpOut").innerHTML = d.results.map(k => `<h4>${esc(k.keyword)}</h4><ul class="list">${k.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>
+        ${table(["#", "Business", "Category", "Rating", "Reviews", "Website"], k.places.map((p, i) => `<tr${p.is_you ? ' class="you"' : ""}><td>${i + 1}</td><td>${link(p.maps_url, p.name)}${p.is_you ? ' <span class="badge good">You</span>' : ""}<span class="sub">${esc(p.address)}</span></td><td>${esc(p.category)}</td><td>${p.rating ?? "–"}</td><td>${p.reviews}</td><td class="path">${p.website ? link(p.website, p.website.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "")) : "–"}</td></tr>`).join(""))}`).join("") + `<p class="muted small">${esc(d.caveat)}</p>`;
+    } catch (e) { $("#gbpmsg").textContent = e.message; }
+  }
+
+  // ---------------------------------------------------------------- links and directories
+  function buildLinksPanel() {
+    $("#panel-links").innerHTML = `
+      <div class="inline"><label>Country <select id="lcountry"><option>India</option><option>USA</option><option>UK</option><option>Canada</option><option>Australia</option><option>UAE</option><option value="">Other</option></select></label>
+      <label>Type of business <select id="lind"><option value="general">Any business</option><option value="health">Healthcare</option><option value="wedding">Weddings and events</option><option value="home">Home services</option><option value="b2b">B2B and industrial</option></select></label></div>
+      <div id="linksOut"></div>`;
+    $("#lcountry").addEventListener("change", loadLinks);
+    $("#lind").addEventListener("change", loadLinks);
+    loadLinks();
+  }
+
+  async function loadLinks() {
+    const r = await fetch(`/api/resources?country=${encodeURIComponent($("#lcountry").value)}&industry=${$("#lind").value}`, { headers: headers() });
+    if (!r.ok) return;
+    const d = await r.json();
+    const rows = list => list.map(x => `<tr><td class="path">${link(x.url, x.name)}</td><td>${esc(x.type)}</td><td>${esc(x.note)}</td></tr>`).join("");
+    $("#linksOut").innerHTML = `
+      <h3>Where to list your business</h3>
+      ${d.region_known ? "" : `<p class="alert">I do not have a curated list for this country yet. The global listings below still apply, and the playbook on the Content plan tab suggests how to find local ones.</p>`}
+      ${d.regional.length ? `<h4>For this region</h4>${table(["Directory", "Best for", "Note"], rows(d.regional))}` : ""}
+      <h4>Worldwide</h4>${table(["Directory", "Best for", "Note"], rows(d.global))}
+      <p class="muted small">${esc(d.note)}</p>
+      <h3>Quickest legitimate ways to get backlinks</h3>
+      <p class="muted">There is no safe shortcut to strong backlinks. These are ordered roughly from fastest to slowest.</p>
+      <p class="alert">${esc(d.tip)}</p>
+      ${d.strategies.map(s => `<details class="issue"><summary><span class="badge ${/Days|1 to 2/.test(s.speed) ? "good" : "warn"}">${esc(s.speed)}</span><span>${esc(s.name)}</span><span class="n">Link value: ${esc(s.quality)}</span></summary><div class="body"><p>${esc(s.how)}</p><p class="muted small">Effort: ${esc(s.effort)}</p></div></details>`).join("")}
+      <h4>Avoid</h4><ul class="list">${d.avoid.map(a => `<li>${esc(a)}</li>`).join("")}</ul>
+      <p class="muted small">Google treats paid and manipulative links as spam, which can lower your rankings.</p>`;
+  }
 
   // ---------------------------------------------------------------- downloads
   function csvCell(v) {

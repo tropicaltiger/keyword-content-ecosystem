@@ -1,7 +1,12 @@
-# Keyword Content Ecosystem (Phase 4)
+# Keyword Content Ecosystem (Phase 5)
 
 Crawl a website, then tell the user, for each target keyword, whether to **optimize an existing page**,
 **create a new page**, or **fix pages that compete**, plus technical issues and how the site is structured.
+
+## Phase 5: competitors, links and speed
+- **Pages tab: size.** Approximate page weight (HTML plus images, scripts and stylesheets found in it, up to 250 files measured per crawl), with the problems found (large images, old formats, no compression, heavy JavaScript, missing dimensions, no lazy loading, broken files), how to fix each, and a rough saving estimate.
+- **Competitors tab:** crawl up to 3 competitor sites and compare their best page for each of your keywords; topics they cover that you do not; **backlink gap** from pasted or uploaded CSV exports (no data provider needed, because crawling cannot discover backlinks); **Google Business Profile** rivals via Google's Places API (needs `GOOGLE_PLACES_API_KEY`), with manual comparison links and a checklist when no key is set.
+- **Links & directories tab:** curated directories by country and business type, and the quickest legitimate backlink routes, ranked by speed and quality.
 
 ## Phase 4: content layer
 - **Content plan tab (free, instant):** who owns each keyword, which pages should link to it, where GBP posts and FAQs should point, and a platform playbook (what is worth your time, and what is not).
@@ -32,6 +37,7 @@ To crawl a site on your own machine (localhost), set `ALLOW_PRIVATE_HOSTS=1`. **
 | `APP_ACCESS_KEY` | unset | If set, the UI asks for it and the API requires `X-Access-Key` |
 | `MAX_CONCURRENT_JOBS` | 2 | Crawls running at once |
 | `RATE_LIMIT_PER_HOUR` | 10 | Analyses one IP can start per hour |
+| `GOOGLE_PLACES_API_KEY` | unset | Turns on automatic GBP competitor checks (Places API (New)) |
 | `ANTHROPIC_API_KEY` | unset | Turns on AI writing. Costs money per run, so set `APP_ACCESS_KEY` too |
 | `ANTHROPIC_MODEL` | claude-sonnet-5-5 | Model used for writing |
 | `CONTENT_LIMIT_PER_HOUR` | 6 | Writing runs one IP can start per hour |

@@ -1,6 +1,10 @@
 """Keyword Content Ecosystem: Flask API and job runner.
 
 POST   /api/analyze      start a crawl, returns a job id
+GET    /api/resources    directories and link routes for a country and industry
+POST   /api/competitors  crawl and compare up to 3 competitor sites (job)
+POST   /api/backlinks    backlink gap from pasted or uploaded CSV exports
+POST   /api/gbp          Google Business Profile rivals (needs GOOGLE_PLACES_API_KEY)
 GET    /api/plan/<id>    free ecosystem map and platform playbook for a finished analysis
 POST   /api/content      start AI writing for a finished analysis (needs ANTHROPIC_API_KEY)
 GET    /api/jobs/<id>    progress, and the result when finished
@@ -12,6 +16,7 @@ Environment variables
   APP_ACCESS_KEY        if set, API calls must send it in the X-Access-Key header
   MAX_CONCURRENT_JOBS   crawls running at once (default 2)
   RATE_LIMIT_PER_HOUR   crawls one IP may start per hour (default 10)
+  GOOGLE_PLACES_API_KEY turns on Google Business Profile competitor checks
   ANTHROPIC_API_KEY     turns on AI writing (GBP posts, FAQs, platform content)
   ANTHROPIC_MODEL       model used for writing (default claude-sonnet-5-5)
   CONTENT_LIMIT_PER_HOUR  writing runs one IP may start per hour (default 6)
@@ -23,13 +28,18 @@ import threading
 import time
 import uuid
 from collections import OrderedDict, defaultdict, deque
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, jsonify, render_template, request
 
 import analysis
+import backlinks
+import competitors
 import content
 import crawler
+import gbp
+import resources
 
 app = Flask(__name__)
 
@@ -127,7 +137,7 @@ def home():
 
 @app.get("/api/config")
 def api_config():
-    return jsonify(auth_required=bool(ACCESS_KEY), ai_enabled=content.ai_enabled())
+    return jsonify(auth_required=bool(ACCESS_KEY), ai_enabled=content.ai_enabled(), gbp_enabled=gbp.enabled())
 
 
 @app.post("/api/analyze")
@@ -254,6 +264,113 @@ def api_content():
         CANCEL[job_id] = threading.Event()
     EXECUTOR.submit(run_content_job, job_id, res, form, channels)
     return jsonify(job_id=job_id, status="queued"), 202
+
+
+def finished_analysis(job_id):
+    with LOCK:
+        job = JOBS.get(str(job_id))
+        res = job.get("result") if job and job["status"] == "complete" else None
+    return res if res and "keywords" in res else None
+
+
+def run_competitor_job(job_id, you, urls, max_pages):
+    cancel = CANCEL[job_id]
+    kws = [k["keyword"] for k in you["keywords"]]
+    result = {"competitors": [], "errors": {}}
+    update(job_id, status="running", progress=3, message="Starting", result=result)
+    try:
+        for i, url in enumerate(urls):
+            base = i / len(urls)
+
+            def on_progress(done, total, msg, base=base, url=url):
+                update(job_id, progress=3 + int(95 * (base + done / max(total, 1) / len(urls))),
+                       message=f"{urlparse(url).hostname or url}: {msg}")
+
+            try:
+                data = crawler.crawl(url, max_pages, on_progress=on_progress, cancelled=cancel.is_set, measure=False)
+                comp = analysis.analyze(data, kws)
+                summary = competitors.summarize(you, data, comp)
+                with LOCK:
+                    JOBS[job_id]["result"]["competitors"].append(summary)
+            except crawler.CrawlRefused as e:
+                with LOCK:
+                    JOBS[job_id]["result"]["errors"][url] = str(e)
+        update(job_id, status="complete", progress=100, message="Done")
+    except crawler.Cancelled:
+        update(job_id, status="cancelled", progress=100, message="Cancelled")
+    except Exception:
+        app.logger.exception("Competitor job %s failed", job_id)
+        update(job_id, status="failed", progress=100, message="Something went wrong while comparing sites.")
+
+
+@app.get("/api/resources")
+def api_resources():
+    industry = request.args.get("industry", "general")
+    return jsonify(resources.for_region(request.args.get("country", "")[:30],
+                                        industry if industry in resources.INDUSTRIES else "general"))
+
+
+@app.post("/api/competitors")
+def api_competitors():
+    d = request.get_json(silent=True) or {}
+    you = finished_analysis(d.get("job_id"))
+    if not you:
+        return jsonify(error="Run an analysis of your own site first."), 400
+    urls = list(dict.fromkeys(str(u).strip() for u in d.get("urls", []) if str(u).strip()))[:3]
+    if not urls:
+        return jsonify(error="Enter at least one competitor website."), 400
+    try:
+        for u in urls:
+            crawler.assert_public_url(crawler.normalize_url(u if "://" in u else "https://" + u) or "x:")
+    except crawler.CrawlRefused as e:
+        return jsonify(error=str(e)), 400
+    with LOCK:
+        if rate_limited(client_ip(), RATE_LIMIT, "comp:"):
+            return jsonify(error=f"Limit reached: {RATE_LIMIT} comparisons per hour. Try again later."), 429
+        purge_jobs()
+        job_id = uuid.uuid4().hex
+        JOBS[job_id] = {"id": job_id, "status": "queued", "progress": 0, "message": "Waiting for a free worker",
+                        "created": time.time()}
+        CANCEL[job_id] = threading.Event()
+    EXECUTOR.submit(run_competitor_job, job_id, you, urls, 30)
+    return jsonify(job_id=job_id, status="queued"), 202
+
+
+@app.post("/api/backlinks")
+def api_backlinks():
+    d = request.get_json(silent=True) or {}
+    you = finished_analysis(d.get("job_id"))
+    comps = []
+    for c in (d.get("competitors") or [])[:3]:
+        doms = backlinks.parse_domains(str(c.get("csv", "")))
+        if doms:
+            comps.append((" ".join(str(c.get("name") or "Competitor").split())[:40], doms))
+    if not comps:
+        return jsonify(error="Paste or upload at least one competitor's backlink export. "
+                             "I could not find any website addresses in what you gave me."), 400
+    yours = backlinks.parse_domains(str(d.get("yours", "")))
+    own = you["site"]["domain"] if you else ""
+    return jsonify(backlinks.gap(yours, comps, own))
+
+
+@app.post("/api/gbp")
+def api_gbp():
+    d = request.get_json(silent=True) or {}
+    you = finished_analysis(d.get("job_id"))
+    if not you:
+        return jsonify(error="Run an analysis of your own site first."), 400
+    kws = [k["keyword"] for k in you["keywords"]]
+    if not gbp.enabled():
+        return jsonify(error="Google Places is not switched on.", manual=gbp.manual_links(kws), checklist=gbp.CHECKLIST), 400
+    with LOCK:
+        if rate_limited(client_ip(), 10, "gbp:"):
+            return jsonify(error="Limit reached: 10 Google checks per hour. Try again later."), 429
+    try:
+        out = gbp.analyze(kws, you["site"]["domain"], " ".join(str(d.get("business_name", "")).split())[:80])
+    except gbp.GbpError as e:
+        return jsonify(error=str(e)), 400
+    out["manual"], out["checklist"] = gbp.manual_links(kws), gbp.CHECKLIST
+    return jsonify(out)
 
 
 @app.get("/api/health")

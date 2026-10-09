@@ -177,3 +177,8 @@ legend { padding: 0 6px; font-weight: 500; }
 .phead .meta { margin-left: auto; }
 .phead .ghost { padding: 3px 10px; font-size: 13px; }
 .piece pre { border: 0; border-radius: 0 0 8px 8px; max-height: none; margin: 0; white-space: pre-wrap; font: inherit; font-size: 14.5px; background: transparent; }
+
+.szd summary { cursor: pointer; white-space: nowrap; }
+.szd[open] { min-width: 320px; white-space: normal; }
+.szd ul { margin: 6px 0; padding-left: 18px; }
+tr.you td { background: #eaf6f0; }

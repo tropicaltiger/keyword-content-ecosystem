@@ -32,6 +32,7 @@ MAX_BODY = 2_000_000         # bytes read per page
 MAX_REDIRECTS = 5
 MAX_SITEMAP_URLS = 5000
 MAX_SITEMAP_FILES = 25
+MAX_PROBES = 250             # files measured per crawl (images, scripts, stylesheets)
 WORKERS = 5
 TEXT_CAP = 30_000            # characters of body text kept for analysis
 
@@ -155,7 +156,8 @@ class Fetcher:
     def fetch(self, url, kind="page"):
         chain, current, net = [], url, 0.0
         out = {"url": url, "final_url": url, "status": 0, "redirects": chain,
-               "content_type": "", "body": b"", "elapsed": 0.0, "error": None, "x_robots": ""}
+               "content_type": "", "body": b"", "elapsed": 0.0, "error": None, "x_robots": "",
+               "size": None, "encoding": ""}
         try:
             for _ in range(MAX_REDIRECTS + 1):
                 assert_public_url(current)
@@ -171,15 +173,18 @@ class Fetcher:
                         continue
                     ct = r.headers.get("Content-Type", "").lower()
                     body = b""
-                    wants_body = kind != "page" or "html" in ct or not ct
+                    wants_body = kind in ("sitemap", "text") or (kind == "page" and ("html" in ct or not ct))
                     if wants_body and r.status_code == 200:
                         for chunk in r.iter_content(65536):
                             body += chunk
                             if len(body) >= MAX_BODY:
                                 break
                     net += time.monotonic() - t0
+                    cl = r.headers.get("Content-Length", "")
                     out.update(final_url=current, status=r.status_code, content_type=ct,
-                               body=body, x_robots=r.headers.get("X-Robots-Tag", ""))
+                               body=body, x_robots=r.headers.get("X-Robots-Tag", ""),
+                               size=int(cl) if cl.isdigit() else None,
+                               encoding=r.headers.get("Content-Encoding", "").lower())
                     return out
                 finally:
                     r.close()
@@ -321,6 +326,26 @@ def parse_page(res, requested, base_key):
         rel = a.get("rel") or []
         internal.append((target, in_body, "nofollow" in [r.lower() for r in rel]))
 
+    resources, seen_r = [], set()
+
+    def add_res(kind, u, **kw):
+        if not u or u.startswith(("data:", "blob:")):
+            return
+        full = urldefrag(urljoin(final, u.strip()))[0]
+        if full.startswith(("http://", "https://")) and full not in seen_r and len(resources) < 60:
+            seen_r.add(full)
+            resources.append({"kind": kind, "url": full, **kw})
+
+    for im in soup.find_all("img"):
+        add_res("image", im.get("src") or im.get("data-src"), has_dims=bool(im.get("width") and im.get("height")),
+                lazy=(im.get("loading") or "").lower() == "lazy" or im.get("data-src") is not None)
+    for sc in soup.find_all("script", src=True):
+        add_res("script", sc["src"])
+    for ln in soup.find_all("link", rel=lambda v: v and "stylesheet" in (v if isinstance(v, list) else [v])):
+        add_res("style", ln.get("href"))
+    inline_js = sum(len(x.string or "") for x in soup.find_all("script") if not x.get("src"))
+    inline_css = sum(len(x.string or "") for x in soup.find_all("style"))
+
     for t in soup(["script", "style", "noscript", "svg", "template", "iframe"]):
         t.decompose()
     main = soup.find("main") or soup.find("article") or soup.body or soup
@@ -347,6 +372,9 @@ def parse_page(res, requested, base_key):
         "links_internal": internal, "external_count": external,
         "elapsed_ms": int(res["elapsed"] * 1000), "redirects": len(res["redirects"]),
         "depth": None, "in_sitemap": False,
+        "html_bytes": len(res["body"]), "transfer_bytes": res.get("size"),
+        "compressed": res.get("encoding", "") in ("gzip", "br", "zstd", "deflate"),
+        "resources": resources, "inline_js": inline_js, "inline_css": inline_css,
     }
 
 
@@ -363,7 +391,7 @@ def _process(fetcher, url, robots, base_key):
     return {"url": url, "res": res, "page": page}
 
 
-def crawl(start_url, max_pages=75, on_progress=None, cancelled=None):
+def crawl(start_url, max_pages=75, on_progress=None, cancelled=None, measure=True):
     cancelled = cancelled or (lambda: False)
     on_progress = on_progress or (lambda n, total, msg: None)
     started = time.monotonic()
@@ -472,6 +500,41 @@ def crawl(start_url, max_pages=75, on_progress=None, cancelled=None):
     if not pages:
         reason = failed[0]["reason"] if failed else "no HTML page was returned"
         raise CrawlRefused(f"Couldn't read the homepage ({reason}).")
+
+    if measure:
+        probe_urls, seen_r = [], set()
+        for kind in ("image", "script", "style"):
+            for p in pages.values():
+                for r in p["resources"]:
+                    if r["kind"] == kind and r["url"] not in seen_r:
+                        seen_r.add(r["url"])
+                        probe_urls.append(r["url"])
+        probe_urls = probe_urls[:MAX_PROBES]
+        sizes = {}
+
+        def probe(u):
+            if same_site(u, base_key) and not robots.can_fetch(UA, u):
+                return u, {}
+            res = fetcher.fetch(u, kind="probe")
+            return u, {"size": res["size"] if res["status"] == 200 else None, "ctype": res["content_type"], "status": res["status"]}
+
+        with ThreadPoolExecutor(WORKERS) as ex:
+            futs = [ex.submit(probe, u) for u in probe_urls]
+            for n, fut in enumerate(as_completed(futs), 1):
+                if cancelled():
+                    for f in futs:
+                        f.cancel()
+                    raise Cancelled()
+                u, info = fut.result()
+                sizes[u] = info
+                if n % 10 == 0:
+                    on_progress(len(pages), max_pages, f"Measuring file sizes ({n} of {len(probe_urls)})")
+        for p in pages.values():
+            for r in p["resources"]:
+                if r["url"] in sizes:
+                    r["size"] = sizes[r["url"]].get("size")
+                    r["ctype"] = sizes[r["url"]].get("ctype", "")
+                    r["status"] = sizes[r["url"]].get("status")
 
     # who links to each broken URL (up to 3 sources)
     broken = {f["url"] for f in failed}
