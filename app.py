@@ -20,10 +20,14 @@ Environment variables
   ANTHROPIC_API_KEY     turns on AI writing (GBP posts, FAQs, platform content)
   ANTHROPIC_MODEL       model used for writing (default claude-sonnet-5-5)
   CONTENT_LIMIT_PER_HOUR  writing runs one IP may start per hour (default 6)
+  JOBS_DB               where finished jobs are saved (default /tmp/kce_jobs.db). Point it at a Railway
+                        volume, e.g. /data/jobs.db, so results survive redeploys
   ALLOW_PRIVATE_HOSTS   set to 1 ONLY for local testing (disables the SSRF guard)
 """
 import hmac
+import json
 import os
+import sqlite3
 import threading
 import time
 import uuid
@@ -46,8 +50,9 @@ app = Flask(__name__)
 ACCESS_KEY = os.environ.get("APP_ACCESS_KEY", "")
 RATE_LIMIT = int(os.environ.get("RATE_LIMIT_PER_HOUR", "10"))
 CONTENT_LIMIT = int(os.environ.get("CONTENT_LIMIT_PER_HOUR", "6"))
-MAX_JOBS_KEPT = 40
-JOB_TTL = 2 * 3600
+MAX_JOBS_KEPT = 100
+JOB_TTL = 6 * 3600
+JOBS_DB = os.environ.get("JOBS_DB", "/tmp/kce_jobs.db")
 
 EXECUTOR = ThreadPoolExecutor(max_workers=int(os.environ.get("MAX_CONCURRENT_JOBS", "2")))
 JOBS = OrderedDict()
@@ -63,24 +68,72 @@ def client_ip():
     return fwd.split(",")[0].strip() or request.remote_addr or "unknown"
 
 
+def _db():
+    return sqlite3.connect(JOBS_DB, timeout=10)
+
+
+def init_store():
+    """Open the job store and load saved jobs. Anything that was running when the server stopped cannot be resumed."""
+    try:
+        os.makedirs(os.path.dirname(JOBS_DB) or ".", exist_ok=True)
+        with _db() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, created REAL, data TEXT)")
+            rows = c.execute("SELECT data FROM jobs ORDER BY created").fetchall()
+        for (data,) in rows:
+            job = json.loads(data)
+            if job["status"] in ("queued", "running"):
+                job.update(status="failed", progress=100,
+                           message="The server restarted while this was running. Please run it again.")
+            JOBS[job["id"]] = job
+    except Exception:
+        app.logger.exception("Could not open the job store; jobs will only be kept in memory")
+
+
+def persist(job_id):
+    """Save a job so a restart does not lose it. Progress ticks are not saved, only state changes."""
+    with LOCK:
+        job = JOBS.get(job_id)
+        data = json.dumps(job) if job else None
+    if data:
+        try:
+            with _db() as c:
+                c.execute("INSERT OR REPLACE INTO jobs (id, created, data) VALUES (?, ?, ?)",
+                          (job_id, json.loads(data)["created"], data))
+        except Exception:
+            app.logger.exception("Could not save job %s", job_id)
+
+
+def forget(ids):
+    if not ids:
+        return
+    try:
+        with _db() as c:
+            c.executemany("DELETE FROM jobs WHERE id = ?", [(i,) for i in ids])
+    except Exception:
+        app.logger.exception("Could not delete old jobs")
+
+
 def update(job_id, **fields):
     with LOCK:
         if job_id in JOBS:
             JOBS[job_id].update(fields)
+    if "status" in fields:
+        persist(job_id)
 
 
 def purge_jobs():
     """Drop expired jobs and keep memory bounded. Call with LOCK held."""
     now = time.time()
-    for jid in [j for j, v in JOBS.items() if now - v["created"] > JOB_TTL and v["status"] not in ("queued", "running")]:
-        JOBS.pop(jid, None)
-        CANCEL.pop(jid, None)
-    while len(JOBS) > MAX_JOBS_KEPT:
-        oldest = next((j for j, v in JOBS.items() if v["status"] not in ("queued", "running")), None)
+    gone = [j for j, v in JOBS.items() if now - v["created"] > JOB_TTL and v["status"] not in ("queued", "running")]
+    while len(JOBS) - len(gone) > MAX_JOBS_KEPT:
+        oldest = next((j for j, v in JOBS.items() if j not in gone and v["status"] not in ("queued", "running")), None)
         if not oldest:
             break
-        JOBS.pop(oldest, None)
-        CANCEL.pop(oldest, None)
+        gone.append(oldest)
+    for jid in gone:
+        JOBS.pop(jid, None)
+        CANCEL.pop(jid, None)
+    threading.Thread(target=forget, args=(gone,), daemon=True).start()
 
 
 def rate_limited(ip, limit=None, bucket=""):
@@ -114,7 +167,8 @@ def run_job(job_id, url, keywords, max_pages):
         def on_progress(done, total, msg):
             update(job_id, progress=min(88, 3 + int(85 * done / max(total, 1))), message=msg)
 
-        data = crawler.crawl(url, max_pages, on_progress=on_progress, cancelled=cancel.is_set)
+        data = crawler.crawl(url, max_pages, on_progress=on_progress, cancelled=cancel.is_set,
+                             priority=lambda u: analysis.url_relevance(u, keywords))
         update(job_id, progress=92, message="Matching keywords to pages")
         result = analysis.analyze(data, keywords)
         update(job_id, status="complete", progress=100, message="Done", result=result)
@@ -129,6 +183,9 @@ def run_job(job_id, url, keywords, max_pages):
 
 
 # -------------------------------------------------------------------------- routes
+
+init_store()
+
 
 @app.get("/")
 def home():
@@ -174,6 +231,7 @@ def api_analyze():
         JOBS[job_id] = {"id": job_id, "status": "queued", "progress": 0, "message": "Waiting for a free worker",
                         "created": time.time()}
         CANCEL[job_id] = threading.Event()
+    persist(job_id)
     EXECUTOR.submit(run_job, job_id, url, keywords, max_pages)
     return jsonify(job_id=job_id, status="queued"), 202
 
@@ -183,7 +241,7 @@ def api_job(job_id):
     with LOCK:
         job = JOBS.get(job_id)
         if not job:
-            return jsonify(error="Job not found. It may have expired."), 404
+            return jsonify(error="This job is no longer on the server. It may have expired, or the server restarted. Please run it again."), 404
         return jsonify({k: v for k, v in job.items() if k != "created"})
 
 
@@ -262,6 +320,7 @@ def api_content():
         JOBS[job_id] = {"id": job_id, "status": "queued", "progress": 0, "message": "Waiting for a free worker",
                         "created": time.time()}
         CANCEL[job_id] = threading.Event()
+    persist(job_id)
     EXECUTOR.submit(run_content_job, job_id, res, form, channels)
     return jsonify(job_id=job_id, status="queued"), 202
 
@@ -332,6 +391,7 @@ def api_competitors():
         JOBS[job_id] = {"id": job_id, "status": "queued", "progress": 0, "message": "Waiting for a free worker",
                         "created": time.time()}
         CANCEL[job_id] = threading.Event()
+    persist(job_id)
     EXECUTOR.submit(run_competitor_job, job_id, you, urls, 30)
     return jsonify(job_id=job_id, status="queued"), 202
 

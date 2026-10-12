@@ -391,7 +391,30 @@ def _process(fetcher, url, robots, base_key):
     return {"url": url, "res": res, "page": page}
 
 
-def crawl(start_url, max_pages=75, on_progress=None, cancelled=None, measure=True):
+def explain_failure(f):
+    """Plain-language reason the homepage could not be read."""
+    if not f:
+        return "Couldn't read the homepage: no web page came back."
+    st, reason = f.get("status", 0), f.get("reason", "")
+    if st == 403:
+        return ("The website refused access (HTTP 403). Its firewall or security plugin is probably blocking automated "
+                "visitors or traffic from cloud servers, even though the site opens in a normal browser. If it is your "
+                "or your client's site, ask whoever manages it to allow the user agent \u201cKeywordEcosystemBot\u201d, "
+                "then try again.")
+    if st == 401:
+        return "The site asks for a login (HTTP 401), so it cannot be analyzed."
+    if st == 404:
+        return "That address was not found (HTTP 404). Check it for typos."
+    if st == 429:
+        return "The site says there were too many requests (HTTP 429). Wait a few minutes and try again."
+    if st in (520, 521, 522, 523, 524):
+        return f"The site's server is not responding (HTTP {st}, a Cloudflare error). The site may be down. Try again later."
+    if st >= 500:
+        return f"The site's server had an error (HTTP {st}). Try again later."
+    return f"Couldn't read the homepage ({reason})."
+
+
+def crawl(start_url, max_pages=75, on_progress=None, cancelled=None, measure=True, priority=None):
     cancelled = cancelled or (lambda: False)
     on_progress = on_progress or (lambda n, total, msg: None)
     started = time.monotonic()
@@ -461,45 +484,59 @@ def crawl(start_url, max_pages=75, on_progress=None, cancelled=None, measure=Tru
             new.append(target)
         return new
 
-    while (frontier or sm_queue or not sm_loaded) and len(pages) < max_pages and attempts < max_pages * 3:
-        if not frontier:
-            if not sm_loaded:
-                sm_loaded = True
-                sitemap_set = {n for n in (normalize_url(x) for x in sm_raw) if n and same_site(n, base_key)}
-                sm_queue = [u for u in sitemap_set if u not in seen]
-                seen.update(sm_queue)
-                for u in sm_queue:
-                    depth_of[u] = None
-            if sm_queue:
-                frontier, sm_queue = sm_queue, []
-            else:
-                break
+    prio = priority or (lambda u: 0.0)
+    attempted = set()
+
+    def load_sitemap():
+        nonlocal sitemap_set, sm_queue, sm_loaded
+        sm_loaded = True
+        sitemap_set = {n for n in (normalize_url(x) for x in sm_raw) if n and same_site(n, base_key)}
+        sm_queue = sorted((u for u in sitemap_set if u not in seen), key=lambda u: (-prio(u), u))
+        seen.update(sm_queue)
+        for u in sm_queue:
+            depth_of[u] = None
+
+    while (frontier or sm_queue) and len(pages) < max_pages and attempts < max_pages * 3:
         budget = max_pages - len(pages)
         batch, rest = frontier[:budget], frontier[budget:]
         attempts += len(batch)
-        new_links = []
+        results = {}
         with ThreadPoolExecutor(WORKERS) as ex:
             futures = [ex.submit(_process, fetcher, u, robots, base_key) for u in batch]
-            for fut in as_completed(futures):
+            for n, fut in enumerate(as_completed(futures), 1):
                 if cancelled():
                     for f in futures:
                         f.cancel()
                     raise Cancelled()
-                new_links.extend(merge(fut.result()))
-                if pages:
-                    max_depth = max(max_depth, max((p["depth"] or 0) for p in pages.values()))
-                on_progress(len(pages), max_pages,
-                            f"Crawled {len(pages)} of up to {max_pages} pages (click depth {max_depth})")
+                r = fut.result()
+                results[r["url"]] = r
+                done = min(len(pages) + n, max_pages)
+                on_progress(done, max_pages, f"Crawled {done} of up to {max_pages} pages (click depth {max_depth})")
+        # merge in the order the batch was queued, never in the order downloads finished,
+        # so the same site always gives the same crawl
+        new_links = []
+        for u in batch:
+            new_links.extend(merge(results[u]))
+            attempted.add(u)
+        if pages:
+            max_depth = max(max_depth, max((p["depth"] or 0) for p in pages.values()))
         frontier = rest + new_links
+        if not sm_loaded:
+            load_sitemap()
+            hot = [u for u in sm_queue if prio(u) >= 0.5]   # sitemap pages that look relevant to the keywords
+            sm_queue = [u for u in sm_queue if prio(u) < 0.5]
+            frontier += hot
+        frontier.sort(key=lambda u: -prio(u))
+        if not frontier and sm_queue:
+            frontier, sm_queue = sm_queue, []
 
     if not sm_loaded:
-        sitemap_set = {n for n in (normalize_url(x) for x in sm_raw) if n and same_site(n, base_key)}
+        load_sitemap()
     for p in pages.values():
         p["in_sitemap"] = p["url"] in sitemap_set or p["requested"] in sitemap_set
 
     if not pages:
-        reason = failed[0]["reason"] if failed else "no HTML page was returned"
-        raise CrawlRefused(f"Couldn't read the homepage ({reason}).")
+        raise CrawlRefused(explain_failure(failed[0] if failed else None))
 
     if measure:
         probe_urls, seen_r = [], set()
@@ -554,5 +591,6 @@ def crawl(start_url, max_pages=75, on_progress=None, cancelled=None, measure=Tru
         "robots": {"found": robots_found, "crawl_delay": delay, "sitemaps": robots_sitemaps},
         "truncated": bool(frontier or sm_queue),
         "non_html_skipped": non_html, "urls_discovered": len(seen),
+        "uncrawled": sorted(u for u in seen if u not in attempted)[:5000],
         "duration_s": round(time.monotonic() - started, 1), "max_pages": max_pages,
     }

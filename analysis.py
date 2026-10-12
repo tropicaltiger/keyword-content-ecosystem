@@ -75,6 +75,31 @@ def score_page(kt, idx, wm=None):
     return round(100 * (0.45 * cov + 0.35 * phrase + 0.20 * tf)), found
 
 
+def url_relevance(url, keywords):
+    """0-1: how many of a keyword's words appear in the URL path. Used to read likely-relevant pages first."""
+    path = re.sub(r"[-_/.]+", " ", unquote(urlparse(url).path))
+    ts = set(tokens(path))
+    best = 0.0
+    for kw in keywords:
+        kt = tokens(kw) or tokens(kw, keep_stop=True)
+        if kt:
+            best = max(best, sum(1 for t in kt if t in ts) / len(kt))
+    return best
+
+
+def uncrawled_matches(kt, unc):
+    out = []
+    for u, ts in unc:
+        cov = sum(1 for t in kt if t in ts) / len(kt)
+        if cov >= 0.67:
+            out.append((cov, len(u), u))
+    out.sort(key=lambda x: (-x[0], x[1], x[2]))
+    return [{"url": u, "path": urlparse(u).path, "coverage": round(c * 100)} for c, _l, u in out[:5]]
+
+
+PENALTY = {"Company / Utility": 0.6, "Archive / Listing": 0.7}   # contact, about, author pages rarely own a service keyword
+
+
 # ----------------------------------------------------------------- classification
 
 BLOG = {"blog", "news", "article", "articles", "insights", "post", "posts", "guide", "guides",
@@ -424,15 +449,17 @@ def analyze(data, keywords):
     for p in pages:
         df.update(set().union(*p["_idx"]["sets"].values()))
     wm = {t: 1 - 0.85 * (n / len(pages)) ** 2 for t, n in df.items()}
+    unc = [(u, set(tokens(re.sub(r"[-_/.]+", " ", unquote(urlparse(u).path))))) for u in data.get("uncrawled", [])]
     for kw in keywords:
         kt = tokens(kw) or tokens(kw, keep_stop=True)
         scored = []
         for p in pages:
             s, found = score_page(kt, p["_idx"], wm)
+            s = round(s * PENALTY.get(p["page_type"], 1))
             p.setdefault("keyword_scores", {})[kw] = s
             scored.append((s, found, p))
         scored.sort(key=lambda x: (-x[0], -x[2]["inbound"]))
-        mappings.append(keyword_report(kw, kt, scored, brand, by_url))
+        mappings.append(keyword_report(kw, kt, scored, brand, by_url, uncrawled_matches(kt, unc), data["truncated"]))
 
     for p in pages:
         sc = p.get("keyword_scores", {})
@@ -541,7 +568,7 @@ def build_facts(pages, by_url, home, mappings, brand, base_key):
     }
 
 
-def keyword_report(kw, kt, scored, brand, by_url):
+def keyword_report(kw, kt, scored, brand, by_url, unc=None, truncated=False):
     intent = intent_of(kw)
     best_s, best_found, best = scored[0]
     rivals = [x for x in scored[1:] if best["page_type"] != "Home" and x[2]["page_type"] != "Home"]
@@ -619,6 +646,15 @@ def keyword_report(kw, kt, scored, brand, by_url):
         warnings.append(f"This keyword looks {INTENT_LABEL[intent].lower()}, but the best match is a {page_type} page. "
                         f"A {want} page may fit the search intent better.")
 
+    if unc:
+        warnings.insert(0, f"{len(unc)} page(s) that look relevant were found on the site but not read, because the page limit "
+                           "was reached: " + ", ".join(m["path"] for m in unc[:3]) + ". This verdict may change. "
+                           "Run the analysis again with a higher page limit.")
+        if decision == "CREATE":
+            actions.insert(0, "Do not create a new page yet. A page that looks relevant exists but was not read.")
+    elif truncated and decision == "CREATE":
+        warnings.insert(0, "The crawl stopped at the page limit, so a matching page may exist that was not read. "
+                           "Run again with a higher page limit before creating a new page.")
     if home_overlap:
         warnings.append("The homepage and a more specific page both match this broad keyword. That is normal: "
                         "keep the homepage general and make the specific page focus on its own topic.")

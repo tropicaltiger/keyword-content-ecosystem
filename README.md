@@ -6,6 +6,7 @@ Crawl a website, then tell the user, for each target keyword, whether to **optim
 ## Phase 5: competitors, links and speed
 - **Pages tab: size.** Approximate page weight (HTML plus images, scripts and stylesheets found in it, up to 250 files measured per crawl), with the problems found (large images, old formats, no compression, heavy JavaScript, missing dimensions, no lazy loading, broken files), how to fix each, and a rough saving estimate.
 - **Competitors tab:** crawl up to 3 competitor sites and compare their best page for each of your keywords; topics they cover that you do not; **backlink gap** from pasted or uploaded CSV exports (no data provider needed, because crawling cannot discover backlinks); **Google Business Profile** rivals via Google's Places API (needs `GOOGLE_PLACES_API_KEY`), with manual comparison links and a checklist when no key is set.
+- **Find competitors automatically** (needs `GOOGLE_PLACES_API_KEY`): the businesses Google shows for your keywords, with directories and social pages removed, ranked by how many of your keywords they appear for. The top 3 fill the comparison form.
 - **Links & directories tab:** curated directories by country and business type, and the quickest legitimate backlink routes, ranked by speed and quality.
 
 ## Phase 4: content layer
@@ -46,10 +47,15 @@ To crawl a site on your own machine (localhost), set `ALLOW_PRIVATE_HOSTS=1`. **
 ## Deploy on Railway
 Push to GitHub and redeploy. Set `APP_ACCESS_KEY` in Railway Variables. Keep **one** gunicorn worker (jobs live in memory).
 
+## Keeping jobs across restarts
+Jobs are saved to SQLite (`JOBS_DB`, default `/tmp/kce_jobs.db`). `/tmp` survives a process restart but not a redeploy.
+To survive redeploys on Railway, add a **Volume** to the service, mount it at `/data`, and set `JOBS_DB=/data/jobs.db`.
+A job that was *running* when the server stopped is marked failed ("please run it again"); it cannot be resumed.
+
 ## Known limits (honest list)
 - Does not run JavaScript, so pages rendered only by JS look empty.
 - DNS-rebinding is a theoretical gap in the SSRF guard (host is resolved at check time and again at connect time).
-- Jobs are lost on restart. For several replicas, move jobs to Redis/Postgres.
+- A crawl that is running during a restart or redeploy is lost. For several replicas, move jobs to Redis/Postgres.
 - Keyword scoring is lexical. Next step is embeddings or an LLM to judge intent and suggest missing subtopics.
 
 ## Suggested next steps

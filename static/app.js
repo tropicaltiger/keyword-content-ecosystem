@@ -57,17 +57,24 @@
     } catch (e) { busy(false); setError(e.message); }
   }
 
+  let fails = 0;
   async function poll() {
     try {
       const r = await fetch("/api/jobs/" + jobId, { headers: headers() });
+      if ([502, 503, 504].includes(r.status)) throw new Error("server busy");
       const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Could not read progress.");
+      fails = 0;
+      if (!r.ok) { stop(); setError(d.error || "Could not read progress."); return; }
       $("#bar").style.width = (d.progress || 0) + "%";
       $("#msg").textContent = d.message || "";
       if (d.status === "complete") { stop(); DATA = d.result; render(DATA); }
       else if (d.status === "failed") { stop(); setError(d.message); }
       else if (d.status === "cancelled") { stop(); setError("Analysis cancelled."); }
-    } catch (e) { stop(); setError(e.message); }
+    } catch (e) {
+      // a restarting server answers badly for a few seconds; keep trying before giving up
+      if (++fails < 8) { $("#msg").textContent = "Waiting for the server"; return; }
+      stop(); setError("Lost contact with the server. If it was restarting, run the analysis again.");
+    }
   }
 
   function stop() { clearInterval(timer); timer = null; busy(false); }
@@ -347,12 +354,15 @@
   const table = (head, rows) => `<div class="tablewrap"><table><thead><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>`;
   const mapsLink = k => "https://www.google.com/maps/search/" + encodeURIComponent(k);
   const GBP_CHECK = ["Main category and extra categories (are rivals more specific?)", "Number of reviews, rating, and how recent the latest reviews are", "Whether the owner replies to reviews", "Services or products listed, with descriptions", "A clear, complete business description", "Number and quality of photos, and how recent they are", "How often they post updates or offers", "Opening hours, booking link and website link"];
-  let compJob = null, compTimer = null, LAST_GAP = null;
+  let compJob = null, compTimer = null, LAST_GAP = null, BRAND = "";
 
   function buildCompetitorsPanel(d) {
+    BRAND = d.facts.brand || "";
     $("#panel-competitors").innerHTML = `
       <h3>Compare competitor websites</h3>
       <p class="muted">Add up to three competitors. Each is crawled (up to 30 pages) and checked against your keywords.</p>
+      ${CFG.gbp_enabled ? `<p><button type="button" class="ghost" id="autoComp">Find competitors automatically</button> <span id="automsg" class="muted small"></span></p><div id="suggestBox"></div>`
+        : `<p class="alert">The tool can find local competitors for you using Google's business data. That needs <b>GOOGLE_PLACES_API_KEY</b> in your server settings. Until then, type them in.</p>`}
       <form id="compform" class="cform"><div class="inline">${[1, 2, 3].map(n => `<label>Competitor ${n}<input id="comp${n}" placeholder="competitor${n}.com"></label>`).join("")}</div>
         <div><button type="submit" class="primary" id="compgo">Compare</button> <span id="compmsg" class="muted small"></span></div></form>
       <div id="compOut"></div>
@@ -383,6 +393,7 @@
       f.text().then(t => { $("#" + i.dataset.fill).value = t; });
     }));
     if ($("#gbpform")) $("#gbpform").addEventListener("submit", e => { e.preventDefault(); checkGbp(); });
+    if ($("#autoComp")) $("#autoComp").addEventListener("click", autoCompetitors);
   }
 
   async function startCompare() {
@@ -435,16 +446,42 @@
     } catch (e) { $("#blmsg").textContent = e.message; }
   }
 
+  async function fetchGbp(name) {
+    const r = await fetch("/api/gbp", { method: "POST", headers: headers(), body: JSON.stringify({ job_id: jobId, business_name: name }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || "Google check failed.");
+    return d;
+  }
+
+  function renderGbp(d) {
+    if (!$("#gbpOut")) return;
+    $("#gbpOut").innerHTML = d.results.map(k => `<h4>${esc(k.keyword)}</h4><ul class="list">${k.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>
+      ${table(["#", "Business", "Category", "Rating", "Reviews", "Website"], k.places.map((p, i) => `<tr${p.is_you ? ' class="you"' : ""}><td>${i + 1}</td><td>${link(p.maps_url, p.name)}${p.is_you ? ' <span class="badge good">You</span>' : ""}<span class="sub">${esc(p.address)}</span></td><td>${esc(p.category)}</td><td>${p.rating ?? "–"}</td><td>${p.reviews}</td><td class="path">${p.website ? link(p.website, p.website.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "")) : "–"}</td></tr>`).join(""))}`).join("") + `<p class="muted small">${esc(d.caveat)}</p>`;
+  }
+
   async function checkGbp() {
     $("#gbpmsg").textContent = "Asking Google";
+    try { const d = await fetchGbp($("#gbpname").value); $("#gbpmsg").textContent = ""; renderGbp(d); }
+    catch (e) { $("#gbpmsg").textContent = e.message; }
+  }
+
+  async function autoCompetitors() {
+    $("#automsg").textContent = "Looking at who Google shows for your keywords"; $("#autoComp").disabled = true;
     try {
-      const r = await fetch("/api/gbp", { method: "POST", headers: headers(), body: JSON.stringify({ job_id: jobId, business_name: $("#gbpname").value }) });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || "Google check failed.");
-      $("#gbpmsg").textContent = "";
-      $("#gbpOut").innerHTML = d.results.map(k => `<h4>${esc(k.keyword)}</h4><ul class="list">${k.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>
-        ${table(["#", "Business", "Category", "Rating", "Reviews", "Website"], k.places.map((p, i) => `<tr${p.is_you ? ' class="you"' : ""}><td>${i + 1}</td><td>${link(p.maps_url, p.name)}${p.is_you ? ' <span class="badge good">You</span>' : ""}<span class="sub">${esc(p.address)}</span></td><td>${esc(p.category)}</td><td>${p.rating ?? "–"}</td><td>${p.reviews}</td><td class="path">${p.website ? link(p.website, p.website.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "")) : "–"}</td></tr>`).join(""))}`).join("") + `<p class="muted small">${esc(d.caveat)}</p>`;
-    } catch (e) { $("#gbpmsg").textContent = e.message; }
+      const d = await fetchGbp(BRAND);
+      renderGbp(d);
+      const s = d.suggestions;
+      if (!s.length) { $("#automsg").textContent = "No competitor websites found. Type them in below."; return; }
+      s.slice(0, 3).forEach((c, i) => { $("#comp" + (i + 1)).value = c.url; });
+      $("#automsg").textContent = "The top 3 are filled in below. Change any of them, then press Compare.";
+      $("#suggestBox").innerHTML = table(["Competitor", "Shows up for", "Best position", "Rating", "Reviews", ""], s.map(c => `<tr><td class="path">${link(c.url, c.name)}<span class="sub">${esc(c.domain)}</span></td><td>${c.keywords.length} of ${d.searched} keywords</td><td>${c.best_rank}</td><td>${c.rating ?? "–"}</td><td>${c.reviews}</td><td><button type="button" class="ghost" data-use="${esc(c.url)}">Use</button></td></tr>`).join(""))
+        + `<p class="muted small">Directories, social pages and your own site are left out. These are the businesses Google shows for your keywords in the area, so they are your local competitors. Sites that rank in normal search results but have no map listing will not appear here.</p>`;
+      document.querySelectorAll("[data-use]").forEach(b => b.addEventListener("click", () => {
+        const slot = [1, 2, 3].map(n => $("#comp" + n)).find(i => !i.value.trim()) || $("#comp3");
+        slot.value = b.dataset.use;
+      }));
+    } catch (e) { $("#automsg").textContent = e.message; }
+    finally { $("#autoComp").disabled = false; }
   }
 
   // ---------------------------------------------------------------- links and directories

@@ -5,6 +5,8 @@ from urllib.parse import quote, urlparse
 
 import requests
 
+from backlinks import classify, registrable
+
 URL = "https://places.googleapis.com/v1/places:searchText"
 FIELDS = ",".join("places." + f for f in ("id", "displayName", "rating", "userRatingCount", "primaryTypeDisplayName",
                                           "websiteUri", "formattedAddress", "googleMapsUri", "businessStatus"))
@@ -64,6 +66,33 @@ def _is_you(p, site_domain, name_tokens):
     return bool(name_tokens) and name_tokens <= set(p["name"].lower().split())
 
 
+SKIP_DOMAINS = {"google.com", "goo.gl", "wa.me", "linktr.ee", "g.page"}
+
+
+def suggest(results, site_domain):
+    """Likely competitors: businesses that show up for your keywords and have their own website.
+    Directories, social profiles and your own site are left out."""
+    agg = {}
+    for r in results:
+        for rank, p in enumerate(r["places"], 1):
+            if p["is_you"] or not p["website"]:
+                continue
+            u = urlparse(p["website"])
+            dom = registrable(u.hostname or "")
+            if not dom or dom == site_domain or dom in SKIP_DOMAINS:
+                continue
+            if classify(dom)[0] in ("Directory or listing", "Social or community profile"):
+                continue
+            a = agg.setdefault(dom, {"domain": dom, "url": f"{u.scheme}://{u.netloc}", "name": p["name"],
+                                     "keywords": [], "best_rank": rank, "rating": p["rating"],
+                                     "reviews": p["reviews"], "category": p["category"]})
+            if r["keyword"] not in a["keywords"]:
+                a["keywords"].append(r["keyword"])
+            a["best_rank"] = min(a["best_rank"], rank)
+    ranked = sorted(agg.values(), key=lambda a: (-len(a["keywords"]), a["best_rank"], -(a["reviews"] or 0)))
+    return ranked[:8]
+
+
 def analyze(keywords, site_domain, business_name):
     tokens = set(business_name.lower().split()) if business_name else set()
     results = []
@@ -91,5 +120,5 @@ def analyze(keywords, site_domain, business_name):
         if cats:
             notes.append("Most common main category among the top results: " + cats.most_common(1)[0][0] + ".")
         results.append({"keyword": kw, "places": places, "notes": notes})
-    return {"results": results,
+    return {"results": results, "suggestions": suggest(results, site_domain), "searched": len(results),
             "caveat": "Results come from Google's Places search. They are close to, but not identical to, what a customer sees in Maps, which depends on location and personalization."}

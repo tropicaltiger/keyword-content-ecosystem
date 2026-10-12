@@ -24,6 +24,8 @@ HEADER_PREF = ("referring page url", "referring url", "source url", "from url", 
 
 def registrable(host):
     host = host.lower().strip(".").removeprefix("www.")
+    if re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
+        return host
     parts = host.split(".")
     if len(parts) < 2:
         return host
