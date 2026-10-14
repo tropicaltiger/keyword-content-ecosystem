@@ -1,7 +1,7 @@
 """Turns raw crawl data into keyword decisions, issues and site structure."""
 import re
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from urllib.parse import unquote, urljoin, urlparse
 
 from crawler import normalize_url, site_key
@@ -282,6 +282,16 @@ def analyze(data, keywords):
         p["_out"] = out
     home0 = by_url.get(data["root"]) or pages[0]
     home_out = home0["_out"]
+    # click depth from the real link map (not from the order pages happened to be fetched in)
+    dist, queue = {home0["url"]: 0}, deque([home0["url"]])
+    while queue:
+        cur = queue.popleft()
+        for t in by_url[cur]["_out"]:
+            if t not in dist:
+                dist[t] = dist[cur] + 1
+                queue.append(t)
+    for p in pages:
+        p["depth"] = dist.get(p["url"])
     for p in pages:
         p["inbound"] = len(in_all[p["url"]])
         p["inbound_body"] = len(in_ctx[p["url"]])
