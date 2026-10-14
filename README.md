@@ -4,6 +4,7 @@ Crawl a website, then tell the user, for each target keyword, whether to **optim
 **create a new page**, or **fix pages that compete**, plus technical issues and how the site is structured.
 
 ## Phase 6: small improvements
+- **Structure tab rewritten in plain language:** a short "what this means" summary, "clicks from the homepage" with percentages, page types with what each one is, site areas grouped by real folders (single pages go under "Top-level pages"), builder/system pages split out, and a "Words explained" box. Warns when "not linked" may be a false alarm because the crawl hit its page limit.
 - **Issues** list the actual image files (name linked to the image, with size) for large images, older formats, missing dimensions, missing alt text, no lazy loading and broken files.
 - **Keywords:** each card has a Title / H1 / meta description / body table (now vs starter suggestion) and a *Write these with AI* button (needs `ANTHROPIC_API_KEY`).
 - **Overview:** the number boxes and the "Fix first" rows are clickable and jump to the matching issue or a filtered Pages list.

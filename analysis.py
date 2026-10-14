@@ -111,6 +111,19 @@ SERVICE = {"service", "services", "solution", "solutions", "product", "products"
 
 
 ARCHIVE = {"author", "tag", "tags", "category", "categories", "page", "feed"}
+SYSTEM_SEGS = {"elementskit-content", "elementor-hf", "e-landing-page", "wp-json", "wp-content", "wp-includes",
+               "wp-admin", "amp", "template", "templates"}
+TYPE_HELP = {
+    "Home": "Your front page.",
+    "Service / Product": "Pages that describe what you sell or offer.",
+    "Blog / Article": "Blog posts and guides.",
+    "Company / Utility": "About, contact, careers, privacy and similar pages.",
+    "Case Study": "Projects and success stories.",
+    "Category / Listing": "Pages that mostly list other pages.",
+    "Archive / Listing": "Automatic lists, such as author or tag pages. Usually low value.",
+    "System / builder page": "Technical pages made by your website builder. Visitors rarely see them.",
+    "Other": "Pages the tool could not place. Worth a quick look by hand.",
+}
 
 
 def classify(p, n_links, home_out):
@@ -120,6 +133,8 @@ def classify(p, n_links, home_out):
     segs = [x for x in path.split("/") if x]
     first = set(re.split(r"[^a-z0-9]+", segs[0]))
     allt = set(re.split(r"[^a-z0-9]+", path))
+    if segs[0] in SYSTEM_SEGS:
+        return "System / builder page"
     if segs[0] in ARCHIVE:
         return "Archive / Listing"
     if first & BLOG:
@@ -298,7 +313,7 @@ def analyze(data, keywords):
     dup_title, dup_meta, dup_text = defaultdict(list), defaultdict(list), defaultdict(list)
     for p in pages:
         u = p["url"]
-        is_utility = p["page_type"] in ("Company / Utility", "Category / Listing", "Archive / Listing")
+        is_utility = p["page_type"] in ("Company / Utility", "Category / Listing", "Archive / Listing", "System / builder page")
         if not p["title"]:
             issue("no_title", "high", "On-page", "Missing title tag",
                   "Add a unique, descriptive title that includes the page's main keyword.", u)
@@ -473,21 +488,60 @@ def analyze(data, keywords):
     types = defaultdict(list)
     sections = defaultdict(list)
     depth_counts = Counter()
+    folder_kids = Counter()
+    seg_of = lambda p: [x for x in p["path"].strip("/").split("/") if x]
     for p in pages:
+        sg = seg_of(p)
+        if len(sg) > 1:
+            folder_kids[sg[0]] += 1
+    for p in pages:
+        sg = seg_of(p)
         types[p["page_type"]].append(p)
-        seg = p["path"].strip("/").split("/")[0]
-        sections["/" + seg if seg else "/ (home)"].append(p)
+        key = "Homepage" if not sg else ("/" + sg[0] + "/" if folder_kids[sg[0]] else "Top-level pages")
+        sections[key].append(p)
         depth_counts["Not linked" if p["depth"] is None else p["depth"]] += 1
+    total = len(pages)
+    pct = lambda n: f"{round(100 * n / total)}%"
+    pgs = lambda n: f"{n} page" + ("" if n == 1 else "s")
+    are = lambda n: "is" if n == 1 else "are"
+    not_linked = depth_counts.get("Not linked", 0)
+    near = sum(v for k, v in depth_counts.items() if k != "Not linked" and k <= 1)
+    deep = sum(v for k, v in depth_counts.items() if k != "Not linked" and k >= 4)
+    insights = [{"level": "good", "text": f"{near} of {total} pages ({pct(near)}) are one click or less from the homepage."}]
+    if deep:
+        insights.append({"level": "warn", "text": f"{pgs(deep)} need{'s' if deep == 1 else ''} 4 or more clicks from the homepage. Link {'it' if deep == 1 else 'them'} from a menu or a hub page."})
+    if not_linked:
+        if data["truncated"]:
+            insights.append({"level": "note", "text": f"{pgs(not_linked)} ({pct(not_linked)}) {are(not_linked)} in your sitemap, but no page we read links to {'it' if not_linked == 1 else 'them'}. "
+                             "The crawl stopped at its page limit, so this may be linked from pages we did not read. "
+                             "Run again with a higher page limit before fixing anything."})
+        else:
+            insights.append({"level": "warn", "text": f"{pgs(not_linked)} ({pct(not_linked)}) {are(not_linked)} in your sitemap but nothing links to {'it' if not_linked == 1 else 'them'}. "
+                             "Add links from related pages, or remove from the sitemap."})
+    top_type, top_pages = max(types.items(), key=lambda kv: len(kv[1]))
+    insights.append({"level": "note", "text": f"Most of the site ({pct(len(top_pages))}) is {top_type} pages."})
+    sysn, arch = len(types.get("System / builder page", [])), len(types.get("Archive / Listing", []))
+    if sysn:
+        insights.append({"level": "note", "text": f"{pgs(sysn)} made by your website builder {'was' if sysn == 1 else 'were'} found (for example {types['System / builder page'][0]['path']}). "
+                         "They are not real content. Ask your developer to keep them out of search results."})
+    if arch:
+        insights.append({"level": "note", "text": f"{pgs(arch)} of automatic archive type (such as author pages) {'was' if arch == 1 else 'were'} found. These are usually low value and often better set to noindex."})
+    svc = types.get("Service / Product", [])
+    menu_only = [p for p in svc if p["inbound_body"] == 0]
+    if svc and menu_only:
+        insights.append({"level": "warn", "text": f"{len(menu_only)} of {len(svc)} service pages ({round(100 * len(menu_only) / len(svc))}%) are linked only from menus or footers, "
+                         "never from page text. Link to them from related blog posts and service pages to help them rank."})
     architecture = {
-        "page_types": [{"type": t, "count": len(v),
-                        "examples": [{"url": x["url"], "path": x["path"]} for x in v[:6]]}
+        "insights": insights, "crawl_limited": bool(data["truncated"]), "max_pages": data["max_pages"],
+        "page_types": [{"type": t, "count": len(v), "percent": round(100 * len(v) / total), "help": TYPE_HELP.get(t, ""),
+                        "examples": [{"url": x["url"], "path": x["path"]} for x in v[:3]]}
                        for t, v in sorted(types.items(), key=lambda kv: -len(kv[1]))],
         "sections": [{"section": s, "count": len(v),
                       "avg_words": round(sum(x["word_count"] for x in v) / len(v)),
                       "avg_inbound": round(sum(x["inbound"] for x in v) / len(v), 1),
                       "avg_inbound_body": round(sum(x["inbound_body"] for x in v) / len(v), 1)}
                      for s, v in sorted(sections.items(), key=lambda kv: -len(kv[1]))[:20]],
-        "depth": [{"depth": k, "count": v} for k, v in sorted(
+        "depth": [{"depth": k, "count": v, "percent": round(100 * v / total)} for k, v in sorted(
             depth_counts.items(), key=lambda kv: (kv[0] == "Not linked", kv[0] if kv[0] != "Not linked" else 0))],
         "most_linked": [{"url": p["url"], "path": p["path"], "inbound": p["inbound"], "inbound_body": p["inbound_body"], "title": p["title"]}
                         for p in sorted(pages, key=lambda x: -x["inbound"])[:10]],

@@ -150,7 +150,7 @@ td.num, th.num { text-align: right; }
 
 /* ---- structure */
 .bars { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
-.barrow { display: grid; grid-template-columns: 90px 1fr 40px; gap: 12px; align-items: center; padding: 4px 0; font-size: 14px; }
+.barrow { display: grid; grid-template-columns: 220px 1fr 95px; gap: 12px; align-items: center; padding: 4px 0; font-size: 14px; }
 .barrow i { display: block; height: 14px; background: var(--note-bg); border-radius: 3px; }
 .barrow i b { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
@@ -194,3 +194,9 @@ tr.you td { background: #eaf6f0; }
 .onpage { margin-top: 14px; }
 .onpage summary { cursor: pointer; font-weight: 500; }
 .onpage .tablewrap { margin: 8px 0; }
+
+.barrow i b.amber { background: #c98a1d; }
+.insights { margin: 8px 0 4px; max-width: 900px; }
+.ins { display: flex; gap: 10px; align-items: baseline; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; }
+.ins .badge { flex: none; }
+@media (max-width: 700px) { .barrow { grid-template-columns: 1fr 70px; } .barrow i { grid-column: 1 / -1; order: 3; } }

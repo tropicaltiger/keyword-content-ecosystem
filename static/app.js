@@ -245,8 +245,10 @@
 
   // ---------------------------------------------------------------- pages table
   const COLS = [
-    ["path", "Page"], ["page_type", "Type"], ["word_count", "Words", true], ["depth", "Depth", true],
-    ["inbound", "Links in", true], ["weight_kb", "Size"], ["best_score", "Best keyword", true], ["flags", "Flags"],
+    ["path", "Page", false, "The page's web address and title"], ["page_type", "Type", false, "What kind of page the tool thinks it is"],
+    ["word_count", "Words", true, "Number of words on the page"], ["depth", "Clicks", true, "Clicks needed to reach this page from the homepage"],
+    ["inbound", "Links in", true, "How many other pages link to this page"], ["weight_kb", "Size", false, "Approximate total size of the page with its images and files"],
+    ["best_score", "Best keyword", true, "Which of your keywords this page matches best, with a score out of 100"], ["flags", "Flags", false, "Problems found on this page"],
   ];
 
   const fmtKB = kb => kb >= 1024 ? (kb / 1024).toFixed(1) + " MB" : kb + " KB";
@@ -266,8 +268,8 @@
     return `<p class="muted small">Size is approximate: the page's HTML plus the images, scripts and stylesheets found in it (up to 250 files measured per crawl).${st.est_savings_kb ? ` Across the site, roughly <b>${fmtKB(st.est_savings_kb)}</b> could be saved. ${st.heavy_pages} page(s) are over 3 MB.` : ""} Open a size to see what is wrong and how to fix it.</p>
       <p id="pfnote" class="small muted" hidden></p>
       <input id="pf" class="filter" type="search" placeholder="Filter by URL, title or type" aria-label="Filter pages">
-      <div class="tablewrap"><table><thead><tr>${COLS.map(([k, label, num]) =>
-        `<th class="${num ? "num" : ""}">${k === "flags" ? label : `<button type="button" data-sort="${k}">${label}</button>`}</th>`).join("")}</tr></thead>
+      <div class="tablewrap"><table><thead><tr>${COLS.map(([k, label, num, tip]) =>
+        `<th class="${num ? "num" : ""}" title="${esc(tip)}">${k === "flags" ? label : `<button type="button" data-sort="${k}">${label}</button>`}</th>`).join("")}</tr></thead>
       <tbody id="pbody"></tbody></table></div>`;
   }
 
@@ -296,20 +298,43 @@
   }
 
   // ---------------------------------------------------------------- structure
+  const depthLabel = d => d === "Not linked" ? "Not linked from pages we read" : d === 0 ? "Homepage" : d === 1 ? "1 click away" : `${d} clicks away`;
+
   function structure(a) {
     const max = Math.max(...a.depth.map(d => d.count), 1);
     const tbl = (head, rows) => `<div class="tablewrap"><table><thead><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>`;
+    const lv = { good: "Good", warn: "Check", note: "Note" };
     return `
-      <h3>Clicks from the homepage</h3>
-      <div class="bars">${a.depth.map(d => `<div class="barrow"><span>${d.depth === "Not linked" ? "Not linked" : "Depth " + d.depth}</span><i><b style="width:${d.count / max * 100}%"></b></i><span>${d.count}</span></div>`).join("")}</div>
+      <p class="lead">How your website is built, and how easy each page is to reach.</p>
+      <div class="insights">${a.insights.map(i => `<div class="ins"><span class="badge ${i.level === "good" ? "good" : i.level === "warn" ? "warn" : "note"}">${lv[i.level]}</span><span>${esc(i.text)}</span></div>`).join("")}</div>
+
+      <h3>How many clicks from the homepage?</h3>
+      <p class="muted">Picture a visitor on your homepage. A page that is <b>1 click away</b> is linked straight from the homepage or menu. Pages that need 4 or more clicks are hard for visitors and for Google to find.</p>
+      <div class="bars">${a.depth.map(d => `<div class="barrow"><span>${depthLabel(d.depth)}</span><i><b class="${d.depth === "Not linked" ? "amber" : ""}" style="width:${d.count / max * 100}%"></b></i><span>${d.count} (${d.percent}%)</span></div>`).join("")}</div>
+
+      <h3>What kinds of pages do you have?</h3>
+      <p class="muted">The tool guesses each page's type from its web address and content. Check the examples to see if it guessed right.</p>
+      ${tbl(["Type", "What it is", "Pages", "Share", "Examples"], a.page_types.map(t => `<tr><td><b>${esc(t.type)}</b></td><td>${esc(t.help)}</td><td>${t.count}</td><td>${t.percent}%</td><td class="path">${t.examples.map(e => link(e.url, e.path)).join("<br>")}</td></tr>`).join(""))}
+
+      <h3>Site areas</h3>
+      <p class="muted">Pages grouped by the folder in their web address, such as <b>/blog/</b>. Single pages that sit directly under the main address are grouped as "Top-level pages". "Linked from page text" counts links inside the main content, and leaves out menus and footers.</p>
+      ${tbl(["Area", "Pages", "Average words", "Linked from anywhere", "Linked from page text"], a.sections.map(s => `<tr><td><b>${esc(s.section)}</b></td><td>${s.count}</td><td>${s.avg_words}</td><td>${s.avg_inbound}</td><td>${s.avg_inbound_body}</td></tr>`).join(""))}
+      <p class="muted small">The last two columns are averages: how many other pages link to a typical page in that area.</p>
+
       <div class="cols">
-        <div><h3>Page types</h3>${tbl(["Type", "Pages", "Examples"], a.page_types.map(t => `<tr><td>${esc(t.type)}</td><td>${t.count}</td><td class="path">${t.examples.slice(0, 3).map(e => link(e.url, e.path)).join("<br>")}</td></tr>`).join(""))}</div>
-        <div><h3>Sections</h3>${tbl(["Section", "Pages", "Avg words", "Links in (all)", "Links in (body)"], a.sections.map(s => `<tr><td>${esc(s.section)}</td><td>${s.count}</td><td>${s.avg_words}</td><td>${s.avg_inbound}</td><td>${s.avg_inbound_body}</td></tr>`).join(""))}</div>
+        <div><h3>Most linked pages</h3><p class="muted">The pages your site pushes hardest. Your most important pages should be near the top.</p>
+          ${tbl(["Page", "Links in", "From page text"], a.most_linked.map(p => `<tr><td class="path">${link(p.url, p.path)}</td><td>${p.inbound}</td><td>${p.inbound_body}</td></tr>`).join(""))}</div>
+        <div><h3>Pages nothing links to</h3>
+          <p class="muted">${a.crawl_limited ? "These may simply be linked from pages the crawl did not reach. Run again with a higher page limit before fixing." : "Visitors cannot click their way to these. Link to them from related pages, or remove them from the sitemap."}</p>
+          ${a.orphans.length ? tbl(["Page"], a.orphans.map(p => `<tr><td class="path">${link(p.url, p.path)}</td></tr>`).join("")) : `<p class="muted">None found.</p>`}</div>
       </div>
-      <div class="cols">
-        <div><h3>Most linked pages</h3>${tbl(["Page", "Links in", "From body"], a.most_linked.map(p => `<tr><td class="path">${link(p.url, p.path)}</td><td>${p.inbound}</td><td>${p.inbound_body}</td></tr>`).join(""))}</div>
-        <div><h3>Orphan pages</h3>${a.orphans.length ? tbl(["Page"], a.orphans.map(p => `<tr><td class="path">${link(p.url, p.path)}</td></tr>`).join("")) : `<p class="muted">None found. Every sitemap page is linked from another page.</p>`}</div>
-      </div>`;
+
+      <details class="issue"><summary><span>Words explained</span></summary><div class="body">
+        <p><b>Clicks from the homepage:</b> the fewest clicks a visitor needs to reach the page, starting at the homepage.</p>
+        <p><b>Links in:</b> how many other pages on your site link to this page. More links tell Google the page matters.</p>
+        <p><b>Linked from page text:</b> links inside the main content of a page. These count for more than menu or footer links, which appear on every page.</p>
+        <p><b>Orphan page:</b> a page that nothing links to. It exists, but visitors and Google can hardly find it.</p>
+        <p><b>Noindex:</b> a setting that tells Google to keep a page out of search results.</p></div></details>`;
   }
 
   // ---------------------------------------------------------------- content plan
