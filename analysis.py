@@ -176,19 +176,20 @@ def size_report(p):
     known = [r for r in res if r.get("size")]
     weight_b = html_b + sum(r["size"] for r in known)
     probs, savings = [], 0.0
+    fl = lambda rs: [{"url": r["url"], "kb": round(r["size"] / 1024) if r.get("size") else 0} for r in rs[:10]]
     imgs = [r for r in known if r["kind"] == "image"]
     heavy = sorted((r for r in imgs if r["size"] > 200 * 1024), key=lambda r: -r["size"])
     if heavy:
         probs.append(dict(key="heavy_images", severity="high" if heavy[0]["size"] > 500 * 1024 else "medium",
                           title="Large images (over 200 KB each)",
                           fix="Resize each image to the size it is shown at (usually under 1600 px wide), compress it, and serve WebP or AVIF.",
-                          detail=f"{len(heavy)} image(s), largest {fmt_kb(round(heavy[0]['size'] / 1024))}"))
+                          detail=f"{len(heavy)} image(s), largest {fmt_kb(round(heavy[0]['size'] / 1024))}", files=fl(heavy)))
         savings += sum(r["size"] for r in heavy) * 0.4
     old = [r for r in imgs if IMG_OLD.search(r["url"]) and r["size"] > 100 * 1024 and r not in heavy]
     if old:
         probs.append(dict(key="old_image_format", severity="low", title="Older image formats (JPG or PNG over 100 KB)",
                           fix="Convert to WebP or AVIF, which are often 25 to 35 percent smaller at similar quality.",
-                          detail=f"{len(old)} image(s)"))
+                          detail=f"{len(old)} image(s)", files=fl(sorted(old, key=lambda r: -r["size"]))))
         savings += sum(r["size"] for r in old) * 0.3
     if not p.get("compressed") and p.get("html_bytes", 0) > 15 * 1024:
         probs.append(dict(key="no_compression", severity="medium", title="Page HTML is not compressed",
@@ -200,7 +201,8 @@ def size_report(p):
     if js_b > 500 * 1024:
         probs.append(dict(key="heavy_js", severity="medium", title="Heavy JavaScript (over 500 KB)",
                           fix="Remove unused plugins and scripts, load non-essential scripts later, and minify or combine files.",
-                          detail=f"{fmt_kb(round(js_b / 1024))} across {len(scripts)} files"))
+                          detail=f"{fmt_kb(round(js_b / 1024))} across {len(scripts)} files",
+                          files=fl(sorted(scripts, key=lambda r: -r["size"]))))
     if weight_b > 3 * 1024 * 1024:
         probs.append(dict(key="heavy_page", severity="high" if weight_b > 5 * 1024 * 1024 else "medium",
                           title="Page is heavy (over 3 MB)",
@@ -211,17 +213,17 @@ def size_report(p):
     if len(nodims) >= 3:
         probs.append(dict(key="img_dimensions", severity="low", title="Images without width and height",
                           fix="Add width and height attributes so the page does not jump around while loading.",
-                          detail=f"{len(nodims)} of {len(all_imgs)} images"))
+                          detail=f"{len(nodims)} of {len(all_imgs)} images", files=fl(nodims)))
     nolazy = [r for r in all_imgs[2:] if not r.get("lazy")]
     if len(nolazy) >= 4:
         probs.append(dict(key="no_lazy", severity="low", title="Images load all at once (no lazy loading)",
                           fix='Add loading="lazy" to images below the first screen so they load as people scroll.',
-                          detail=f"{len(nolazy)} images"))
+                          detail=f"{len(nolazy)} images", files=fl(nolazy)))
     broken = [r for r in res if (r.get("status") or 0) >= 400]
     if broken:
         probs.append(dict(key="broken_files", severity="medium", title="Broken images or files (error when loaded)",
                           fix="Fix or remove these references so visitors do not see missing images.",
-                          detail=f"{len(broken)} file(s), for example {broken[0]['url'].rsplit('/', 1)[-1][:40]}"))
+                          detail=f"{len(broken)} file(s)", files=fl(broken)))
     top = sorted(known, key=lambda r: -r["size"])[:5]
     return {"html_kb": round(html_b / 1024), "weight_kb": round(weight_b / 1024) if html_b else None,
             "measured": measured, "unmeasured": sum(1 for r in res if "size" in r and not r.get("size")),
@@ -285,10 +287,10 @@ def analyze(data, keywords):
     # ---- issues
     issues = {}
 
-    def issue(key, severity, category, title, fix, url, detail=""):
+    def issue(key, severity, category, title, fix, url, detail="", files=None):
         it = issues.setdefault(key, {"type": key, "severity": severity, "category": category,
                                      "title": title, "fix": fix, "items": []})
-        it["items"].append({"url": url, "detail": detail})
+        it["items"].append({"url": url, "detail": detail, "files": files or []})
 
     def flag(p, label, severity):
         p["flags"].append({"label": label, "level": LEVEL[severity]})
@@ -349,7 +351,9 @@ def analyze(data, keywords):
         if p["images_no_alt"]:
             issue("img_alt", "low", "On-page", "Images without alt attributes",
                   "Add short descriptive alt text to meaningful images.", u,
-                  f"{p['images_no_alt']} of {p['images']} images")
+                  f"{p['images_no_alt']} of {p['images']} images",
+                  [{"url": r["url"], "kb": 0} for r in p.get("resources", [])
+                   if r["kind"] == "image" and r.get("has_alt") is False][:10])
         if p["elapsed_ms"] > 2500:
             issue("slow", "low", "Technical", "Slow server response (over 2.5 s)",
                   "Check hosting, caching and heavy server-side work.", u, f"{p['elapsed_ms']} ms")
@@ -358,7 +362,7 @@ def analyze(data, keywords):
                   "Redirect straight to the final URL.", u, f"{p['redirects']} hops")
         sz = p["_size"] = size_report(p)
         for pr in sz["problems"]:
-            issue(pr["key"], pr["severity"], "Speed", pr["title"], pr["fix"], u, pr["detail"])
+            issue(pr["key"], pr["severity"], "Speed", pr["title"], pr["fix"], u, pr["detail"], pr.get("files"))
         if sz["weight_kb"] and sz["weight_kb"] > 3072:
             flag(p, "HEAVY", "high" if sz["weight_kb"] > 5120 else "medium")
         if p["depth"] is not None and p["depth"] >= 4:
@@ -554,7 +558,7 @@ def build_facts(pages, by_url, home, mappings, brand, base_key):
     """What the site itself says. The AI writer may only use these facts."""
     def item(p, n):
         return {"url": p["url"], "path": p["path"], "title": p["title"], "h1": " | ".join(p["h1"][:2]),
-                "h2": p["h2"][:8], "excerpt": p["text"][:n]}
+                "h2": p["h2"][:8], "meta": p["meta"], "excerpt": p["text"][:n]}
     kwp = {}
     for m in mappings:
         u = (m["target"] or m["closest"])["url"]
@@ -667,7 +671,11 @@ def keyword_report(kw, kt, scored, brand, by_url, unc=None, truncated=False):
         for h in p["h2"]:
             if h and h not in headings:
                 headings.append(h)
+    brand_txt = brand or "our team"
+    meta_starter = f"{title_case}: {brand_txt}. [ADD: what makes you different]. Contact us to book."[:155]
     return {
+        "current": {"title": best["title"], "h1": best["h1"][0] if best["h1"] else "", "meta": best["meta"],
+                    "words": best["word_count"], "path": best["path"], "is_new": decision == "CREATE"},
         "keyword": kw, "intent": INTENT_LABEL[intent], "decision": decision, "owner_url": owner_url,
         "decision_label": labels[decision], "score": best_s,
         "target": None if decision == "CREATE" else {
@@ -680,5 +688,5 @@ def keyword_report(kw, kt, scored, brand, by_url, unc=None, truncated=False):
         "actions": actions, "warnings": warnings, "competing": competing,
         "link_from": [{"url": p["url"], "path": p["path"], "score": s} for s, p in related],
         "related_headings": headings[:10],
-        "suggested": {"title": suggested_title, "h1": title_case},
+        "suggested": {"title": suggested_title, "h1": title_case, "meta": meta_starter},
     }

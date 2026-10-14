@@ -338,7 +338,8 @@ def parse_page(res, requested, base_key):
 
     for im in soup.find_all("img"):
         add_res("image", im.get("src") or im.get("data-src"), has_dims=bool(im.get("width") and im.get("height")),
-                lazy=(im.get("loading") or "").lower() == "lazy" or im.get("data-src") is not None)
+                lazy=(im.get("loading") or "").lower() == "lazy" or im.get("data-src") is not None,
+                has_alt=im.get("alt") is not None)
     for sc in soup.find_all("script", src=True):
         add_res("script", sc["src"])
     for ln in soup.find_all("link", rel=lambda v: v and "stylesheet" in (v if isinstance(v, list) else [v])):

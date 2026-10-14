@@ -279,6 +279,30 @@ def run_content_job(job_id, analysis_result, form, channels):
         update(job_id, status="failed", progress=100, message="Something went wrong while writing.")
 
 
+def parse_form(d):
+    clean = lambda key, n: " ".join(str(d.get(key, "")).split())[:n]
+    return {"business_name": clean("business_name", 80), "city": clean("city", 60), "country": clean("country", 40),
+            "tone": d.get("tone") if d.get("tone") in content.TONES else "friendly",
+            "language": clean("language", 40) or "English", "extra_facts": str(d.get("extra_facts", "")).strip()[:1500]}
+
+
+@app.post("/api/onpage")
+def api_onpage():
+    d = request.get_json(silent=True) or {}
+    res = finished_analysis(d.get("job_id"))
+    if not res:
+        return jsonify(error="Run an analysis first."), 400
+    if not content.ai_enabled():
+        return jsonify(error="AI writing is not switched on. Add ANTHROPIC_API_KEY in your server settings."), 400
+    with LOCK:
+        if rate_limited(client_ip(), CONTENT_LIMIT * 4, "onpage:"):
+            return jsonify(error="Limit reached for this hour. Try again later."), 429
+    try:
+        return jsonify(content.write_onpage(res, parse_form(d), str(d.get("keyword", ""))))
+    except content.WriterError as e:
+        return jsonify(error=str(e)), 400
+
+
 @app.get("/api/plan/<job_id>")
 def api_plan(job_id):
     with LOCK:
@@ -304,14 +328,7 @@ def api_content():
     channels = [c for c in d.get("channels", []) if c in content.CHANNELS][:7]
     if not channels:
         return jsonify(error="Pick at least one channel to write."), 400
-    form = {
-        "business_name": " ".join(str(d.get("business_name", "")).split())[:80],
-        "city": " ".join(str(d.get("city", "")).split())[:60],
-        "country": " ".join(str(d.get("country", "")).split())[:40],
-        "tone": d.get("tone") if d.get("tone") in content.TONES else "friendly",
-        "language": " ".join(str(d.get("language", "English")).split())[:40] or "English",
-        "extra_facts": str(d.get("extra_facts", "")).strip()[:1500],
-    }
+    form = parse_form(d)
     with LOCK:
         if rate_limited(client_ip(), CONTENT_LIMIT, "content:"):
             return jsonify(error=f"Limit reached: {CONTENT_LIMIT} writing runs per hour. Try again later."), 429

@@ -72,12 +72,17 @@ button { border-radius: 6px; padding: 10px 16px; font-weight: 500; cursor: point
 
 /* ---- overview */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0; margin: 20px 0 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
-.stats div { padding: 14px 16px; border-right: 1px solid var(--line); }
-.stats div:last-child { border-right: 0; }
+.stats div, .stats .stat { padding: 14px 16px; border-right: 1px solid var(--line); }
+.stats .stat { background: none; border-top: 0; border-bottom: 0; border-left: 0; border-radius: 0; text-align: left; color: inherit; cursor: pointer; }
+.stats .stat:hover { background: #f1f5f8; }
+.stats .stat:last-child { border-right: 0; }
+.stats .stat span { display: block; }
 .stats b { display: block; font-size: 26px; font-weight: 600; line-height: 1.1; }
 .stats span { color: var(--muted); font-size: 13px; }
 .fixfirst { list-style: none; padding: 0; margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
-.fixfirst li { display: flex; gap: 12px; align-items: baseline; padding: 11px 16px; border-bottom: 1px solid var(--line); }
+.fixfirst li { border-bottom: 1px solid var(--line); }
+.rowbtn { display: flex; gap: 12px; align-items: baseline; width: 100%; padding: 11px 16px; background: none; border: 0; border-radius: 0; text-align: left; cursor: pointer; font-weight: 400; }
+.rowbtn:hover { background: #f1f5f8; }
 .fixfirst li:last-child { border-bottom: 0; }
 .fixfirst .n { margin-left: auto; color: var(--muted); white-space: nowrap; }
 
@@ -182,3 +187,10 @@ legend { padding: 0 6px; font-weight: 500; }
 .szd[open] { min-width: 320px; white-space: normal; }
 .szd ul { margin: 6px 0; padding-left: 18px; }
 tr.you td { background: #eaf6f0; }
+
+.issue ul.files { margin: 4px 0 2px; padding-left: 14px; list-style: disc; }
+.issue ul.files li { border: 0; padding: 1px 0; font-size: 13px; }
+.issue ul.files li span { display: inline; margin-left: 6px; }
+.onpage { margin-top: 14px; }
+.onpage summary { cursor: pointer; font-weight: 500; }
+.onpage .tablewrap { margin: 8px 0; }

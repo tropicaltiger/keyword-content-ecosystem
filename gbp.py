@@ -1,5 +1,6 @@
 """Google Business Profile competition via Google's official Places API (New). Needs GOOGLE_PLACES_API_KEY."""
 import os
+import time
 from collections import Counter
 from urllib.parse import quote, urlparse
 
@@ -34,7 +35,22 @@ def manual_links(keywords):
     return [{"keyword": k, "url": "https://www.google.com/maps/search/" + quote(k)} for k in keywords]
 
 
+_CACHE = {}          # keyword -> (time, results). Repeat checks within 12 hours cost nothing.
+CACHE_SECONDS = 12 * 3600
+
+
 def search(keyword, n=10):
+    hit = _CACHE.get(keyword.lower())
+    if hit and time.time() - hit[0] < CACHE_SECONDS:
+        return [dict(p) for p in hit[1]]
+    out = _search(keyword, n)
+    if len(_CACHE) > 500:
+        _CACHE.clear()
+    _CACHE[keyword.lower()] = (time.time(), out)
+    return [dict(p) for p in out]
+
+
+def _search(keyword, n=10):
     key = os.environ.get("GOOGLE_PLACES_API_KEY")
     if not key:
         raise GbpError("Google Places is not switched on. Add GOOGLE_PLACES_API_KEY in your server settings.")

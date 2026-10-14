@@ -304,6 +304,30 @@ def generate(a, form, channels, on_result):
                 on_result(futs[f], None, "Something went wrong writing this part. Try again.")
 
 
+def write_onpage(a, form, keyword):
+    """Title, H1, meta description, opening paragraph and section headings for the page that should own a keyword."""
+    k = next((x for x in a["keywords"] if x["keyword"].lower() == keyword.lower()), None)
+    if not k:
+        raise WriterError("That keyword is not part of this analysis.")
+    cur = k["current"]
+    if cur["is_new"]:
+        page = "This is a NEW page that does not exist yet. The closest existing page is " + cur["path"] + "."
+    else:
+        page = (f"This is the EXISTING page {cur['path']}. Current title: {cur['title'] or 'none'}. Current H1: "
+                f"{cur['h1'] or 'none'}. Current meta description: {cur['meta'] or 'none'}. Length: {cur['words']} words. "
+                "Improve it, keeping anything good and true.")
+    user = ("TASK: onpage\nWrite on-page text for ONE page.\n\nFACTS\n" + context_block(a, form)
+            + f"\n\nTARGET KEYWORD: {k['keyword']} (search intent: {k['intent']})\n{page}\n\nReturn JSON exactly like:\n"
+            '{"title":"max 60 characters","h1":"","meta":"max 155 characters, with a reason to click",'
+            '"intro":"80 to 120 word opening paragraph","h2s":["4 to 6 section headings"],'
+            '"note":"one sentence on what you assumed or what facts are missing"}')
+    d = parse_json(llm(system_prompt(form), user, 1500))
+    el = lambda key, limit: {"text": _s(d.get(key), 1500), "chars": len(_s(d.get(key), 1500)),
+                             "over": len(_s(d.get(key), 1500)) > limit, "watch": flag_words(d.get(key))}
+    return {"keyword": k["keyword"], "title": el("title", 60), "h1": el("h1", 70), "meta": el("meta", 160),
+            "intro": el("intro", 1200), "h2s": [_s(x, 150) for x in (d.get("h2s") or [])[:8]], "note": _s(d.get("note"), 400)}
+
+
 # ------------------------------------------------- deterministic plan (no AI, no cost)
 
 def ecosystem_map(a):

@@ -7,7 +7,7 @@
   let DATA = null, jobId = null, timer = null, CFG = {}, cTimer = null, cJob = null;
   let KEY = sessionStorage.getItem("kce_key") || "";
   const sort = { key: "best_score", dir: -1 };
-  let filter = "";
+  let filter = "", pageFilterFn = null;
 
   const headers = () => ({ "Content-Type": "application/json", ...(KEY ? { "X-Access-Key": KEY } : {}) });
 
@@ -90,7 +90,7 @@
     $("#empty").hidden = true;
     $("#results").hidden = false;
     $("#panel-overview").innerHTML = overview(d);
-    $("#panel-keywords").innerHTML = d.keywords.map(keywordCard).join("");
+    $("#panel-keywords").innerHTML = d.keywords.map((k, i) => keywordCard(k, i)).join("");
     $("#panel-issues").innerHTML = issuesPanel(d);
     $("#panel-pages").innerHTML = pagesShell(d);
     bindPages();
@@ -106,17 +106,18 @@
 
   function overview(d) {
     const s = d.stats, dc = d.discovery;
-    const stat = (n, label) => `<div><b>${esc(n)}</b><span>${esc(label)}</span></div>`;
+    const stat = (n, label, go) => `<button type="button" class="stat" data-go="${go}"><b>${esc(n)}</b><span>${esc(label)}</span></button>`;
     const top = d.issues.slice(0, 5);
     return `
       <p class="lead">${esc(d.summary)}</p>
       <div class="stats">
-        ${stat(s.pages_analyzed, "pages analyzed")}${stat(s.urls_discovered, "URLs discovered")}
-        ${stat(s.sitemap_urls, "URLs in sitemap")}${stat(s.thin, "thin pages")}
-        ${stat(s.orphans, "orphan pages")}${stat(s.failed, "broken URLs")}${stat(s.avg_words, "average words")}
+        ${stat(s.pages_analyzed, "pages analyzed", "pages:")}${stat(s.urls_discovered, "URLs discovered", "pages:")}
+        ${stat(s.sitemap_urls, "URLs in sitemap", "pages:sitemap")}${stat(s.thin, "thin pages", "issues:thin")}
+        ${stat(s.orphans, "orphan pages", "issues:orphan")}${stat(s.failed, "broken URLs", "issues:broken_4xx,http_error,fetch_failed")}
+        ${stat(s.heavy_pages, "pages over 3 MB", "pages:heavy")}${stat(s.avg_words, "average words", "pages:words")}
       </div>
       <h3>Fix first</h3>
-      ${top.length ? `<ul class="fixfirst">${top.map(i => `<li><span class="badge ${lvl(i.severity)}">${esc(i.severity)}</span>${esc(i.title)}<span class="n">${i.count} page${i.count === 1 ? "" : "s"}</span></li>`).join("")}</ul>` : `<p class="muted">No issues found.</p>`}
+      ${top.length ? `<ul class="fixfirst">${top.map(i => `<li><button type="button" class="rowbtn" data-go="issues:${esc(i.type)}"><span class="badge ${lvl(i.severity)}">${esc(i.severity)}</span>${esc(i.title)}<span class="n">${i.count} page${i.count === 1 ? "" : "s"}</span></button></li>`).join("")}</ul>` : `<p class="muted">No issues found.</p>`}
       <h3>How the site was read</h3>
       <div class="tablewrap"><table><tbody>
         <tr><td>Site</td><td>${link(d.site.url)}</td></tr>
@@ -130,7 +131,46 @@
 
   const lvl = sev => ({ high: "bad", medium: "warn", low: "note" }[sev] || "note");
 
-  function keywordCard(k) {
+  function onpageBlock(k, idx) {
+    const c = k.current, f = k.found, s = k.suggested;
+    const miss = c.is_new || !c.title || !c.h1 || !c.meta || !f.title || !f.h1 || !f.meta || !(f.body_count > 0);
+    const now = (v, ok) => v ? `${esc(v)}${ok === false ? ' <span class="badge warn">keyword missing</span>' : ""}` : '<span class="badge bad">Missing</span>';
+    const rows = c.is_new ? "" : `<tr><td>Title</td><td>${now(c.title, f.title)}</td><td>${esc(s.title)}</td></tr>
+      <tr><td>H1</td><td>${now(c.h1, f.h1)}</td><td>${esc(s.h1)}</td></tr>
+      <tr><td>Meta description</td><td>${now(c.meta, f.meta)}</td><td>${esc(s.meta)}</td></tr>
+      <tr><td>Body</td><td>${c.words} words${f.body_count > 0 ? `, keyword used ${f.body_count} time${f.body_count === 1 ? "" : "s"}` : ' <span class="badge warn">keyword not in body</span>'}</td><td>Opening paragraph and section headings: use Write with AI</td></tr>`;
+    return `<details class="onpage" ${miss ? "open" : ""}><summary>Title, H1, meta description and body${miss ? " (something is missing)" : ""}</summary>
+      ${c.is_new ? `<p class="small muted">No existing page fits, so these are for the new page.</p>${table(["Element", "Starter text"], `<tr><td>Title</td><td>${esc(s.title)}</td></tr><tr><td>H1</td><td>${esc(s.h1)}</td></tr><tr><td>Meta description</td><td>${esc(s.meta)}</td></tr>`)}`
+        : table(["Element", "Now", "Starter suggestion"], rows)}
+      <p class="small muted">Starter text is a template. Replace anything in [ADD: ...] with a real fact.</p>
+      <p><button type="button" class="ghost" data-onpage="${idx}" ${CFG.ai_enabled ? "" : "disabled"}>Write these with AI</button> ${CFG.ai_enabled ? "" : '<span class="muted small">Needs ANTHROPIC_API_KEY on the server.</span>'} <span class="muted small" id="onmsg-${idx}"></span></p>
+      <div id="onpage-${idx}"></div></details>`;
+  }
+
+  async function writeOnpage(idx, btn) {
+    const k = DATA.keywords[idx], v = id => ($(id) ? $(id).value : "");
+    btn.disabled = true; $("#onmsg-" + idx).textContent = "Writing";
+    try {
+      const r = await fetch("/api/onpage", { method: "POST", headers: headers(), body: JSON.stringify({
+        job_id: jobId, keyword: k.keyword, business_name: v("#cname") || DATA.facts.brand, city: v("#ccity"), country: v("#ccountry"),
+        tone: v("#ctone") || "friendly", language: v("#clang") || "English", extra_facts: v("#cfacts") }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Could not write.");
+      $("#onmsg-" + idx).textContent = "";
+      $("#onpage-" + idx).innerHTML = piece("Title", d.title.text, cc(d.title.chars, 60) + watch(d.title.watch)) + piece("H1", d.h1.text, watch(d.h1.watch))
+        + piece("Meta description", d.meta.text, cc(d.meta.chars, 160) + watch(d.meta.watch)) + piece("Opening paragraph", d.intro.text, watch(d.intro.watch))
+        + (d.h2s.length ? `<h4>Suggested section headings</h4><ul class="list">${d.h2s.map(h => `<li>${esc(h)}</li>`).join("")}</ul>` : "")
+        + (d.note ? `<p class="muted small">${esc(d.note)}</p>` : "");
+    } catch (e) { $("#onmsg-" + idx).textContent = e.message; }
+    finally { btn.disabled = false; }
+  }
+
+  document.addEventListener("click", e => {
+    const b = e.target.closest("[data-onpage]");
+    if (b && DATA) writeOnpage(+b.dataset.onpage, b);
+  });
+
+  function keywordCard(k, idx) {
     const f = k.found, t = k.target;
     const fieldChip = (ok, label) => `<li class="${ok ? "on" : "off"}">${label}${ok ? "" : " missing"}</li>`;
     const body = f.body_count > 0 ? `<li class="on">Body, ${f.body_count} time${f.body_count === 1 ? "" : "s"}</li>` : `<li class="off">Body missing</li>`;
@@ -147,6 +187,7 @@
       </div>
       ${t ? `<ul class="chips" aria-label="Where the keyword appears">${fieldChip(f.title, "Title")}${fieldChip(f.h1, "H1")}${fieldChip(f.url, "URL")}${fieldChip(f.meta, "Meta description")}${fieldChip(f.h2, "H2")}${body}</ul>` : ""}
       ${k.warnings.map(w => `<p class="alert">${esc(w)}</p>`).join("")}
+      ${onpageBlock(k, idx)}
       <h4>What to do</h4>
       <ul class="list">${k.actions.map(a => `<li>${esc(a)}</li>`).join("")}</ul>
       ${k.competing.length ? `<h4>Competing pages</h4><div class="tablewrap"><table><thead><tr><th>Page</th><th class="num">Score</th><th class="num">Links in</th></tr></thead><tbody>${k.competing.map(c => `<tr><td class="path">${link(c.url, c.path)}</td><td class="num">${c.score}</td><td class="num">${c.inbound}</td></tr>`).join("")}</tbody></table></div>` : ""}
@@ -156,17 +197,50 @@
     </article>`;
   }
 
+  function fname(u) {
+    let n = u.replace(/[?#].*$/, "").split("/").filter(Boolean).pop() || u;
+    try { n = decodeURIComponent(n); } catch (e) { /* keep as is */ }
+    return n.length > 70 ? n.slice(0, 67) + "..." : n;
+  }
+  const fileList = files => (files && files.length)
+    ? `<ul class="files">${files.map(f => `<li>${link(f.url, fname(f.url))}${f.kb ? ` <span class="kb">${f.kb >= 1024 ? (f.kb / 1024).toFixed(1) + " MB" : f.kb + " KB"}</span>` : ""}</li>`).join("")}</ul>` : "";
+
   function issuesPanel(d) {
     if (!d.issues.length) return `<p class="muted">No issues found.</p>`;
     return d.issues.map(i => `
-      <details class="issue">
+      <details class="issue" data-key="${esc(i.type)}">
         <summary><span class="badge ${lvl(i.severity)}">${esc(i.severity)}</span><span>${esc(i.title)} <span class="muted small">${esc(i.category)}</span></span><span class="n">${i.count} item${i.count === 1 ? "" : "s"}</span></summary>
         <div class="body">
           <p class="fix"><b>How to fix:</b> ${esc(i.fix)}</p>
-          <ul>${i.items.map(x => `<li>${link(x.url)}${x.detail ? `<span>${esc(x.detail)}</span>` : ""}</li>`).join("")}</ul>
+          <ul>${i.items.map(x => `<li>${link(x.url)}${x.detail ? `<span>${esc(x.detail)}</span>` : ""}${fileList(x.files)}</li>`).join("")}</ul>
           ${i.count > i.items.length ? `<p class="muted small">Showing ${i.items.length} of ${i.count}. Download the CSV for the full list.</p>` : ""}
         </div>
       </details>`).join("");
+  }
+
+  // ---------------------------------------------------------------- jumps from overview boxes
+  document.addEventListener("click", e => {
+    const b = e.target.closest("[data-go]");
+    if (!b || !DATA) return;
+    const [kind, arg = ""] = b.dataset.go.split(":");
+    showTab(kind);
+    if (kind === "issues") {
+      const el = arg.split(",").map(k => document.querySelector(`#panel-issues details[data-key="${k}"]`)).find(Boolean);
+      if (el) { el.open = true; el.scrollIntoView({ block: "start" }); } else window.scrollTo({ top: 0 });
+    } else if (kind === "pages") { applyPages(arg); window.scrollTo({ top: 0 }); }
+  });
+
+  function applyPages(mode) {
+    pageFilterFn = null; filter = ""; sort.key = "best_score"; sort.dir = -1; $("#pf").value = "";
+    let msg = "";
+    if (mode === "sitemap") { pageFilterFn = p => p.in_sitemap; msg = "Showing only pages listed in the sitemap."; }
+    else if (mode === "heavy") { sort.key = "weight_kb"; msg = "Sorted by size, largest first."; }
+    else if (mode === "words") { sort.key = "word_count"; sort.dir = 1; msg = "Sorted by word count, shortest first."; }
+    const note = $("#pfnote");
+    note.hidden = !msg;
+    note.innerHTML = msg ? `${esc(msg)} <button type="button" class="ghost" id="pfclear">Show all</button>` : "";
+    if (msg) $("#pfclear").addEventListener("click", () => applyPages(""));
+    renderPagesTable();
   }
 
   // ---------------------------------------------------------------- pages table
@@ -190,6 +264,7 @@
   function pagesShell() {
     const st = DATA.stats;
     return `<p class="muted small">Size is approximate: the page's HTML plus the images, scripts and stylesheets found in it (up to 250 files measured per crawl).${st.est_savings_kb ? ` Across the site, roughly <b>${fmtKB(st.est_savings_kb)}</b> could be saved. ${st.heavy_pages} page(s) are over 3 MB.` : ""} Open a size to see what is wrong and how to fix it.</p>
+      <p id="pfnote" class="small muted" hidden></p>
       <input id="pf" class="filter" type="search" placeholder="Filter by URL, title or type" aria-label="Filter pages">
       <div class="tablewrap"><table><thead><tr>${COLS.map(([k, label, num]) =>
         `<th class="${num ? "num" : ""}">${k === "flags" ? label : `<button type="button" data-sort="${k}">${label}</button>`}</th>`).join("")}</tr></thead>
@@ -209,7 +284,7 @@
   function renderPagesTable() {
     const val = p => sort.key === "depth" ? (p.depth ?? 99) : p[sort.key];
     const rows = DATA.pages
-      .filter(p => !filter || `${p.url} ${p.title} ${p.page_type}`.toLowerCase().includes(filter))
+      .filter(p => (!pageFilterFn || pageFilterFn(p)) && (!filter || `${p.url} ${p.title} ${p.page_type}`.toLowerCase().includes(filter)))
       .sort((a, b) => { const x = val(a), y = val(b); return (x > y ? 1 : x < y ? -1 : 0) * sort.dir; });
     $("#pbody").innerHTML = rows.map(p => `<tr>
       <td class="path">${link(p.url, p.path)}<span class="sub">${esc(p.title || "(no title)")}</span></td>
@@ -530,8 +605,8 @@
   }
 
   function issuesCsv() {
-    const rows = [["severity", "category", "issue", "url", "detail", "how_to_fix"]];
-    DATA.issues.forEach(i => i.items.forEach(x => rows.push([i.severity, i.category, i.title, x.url, x.detail, i.fix])));
+    const rows = [["severity", "category", "issue", "url", "detail", "files", "how_to_fix"]];
+    DATA.issues.forEach(i => i.items.forEach(x => rows.push([i.severity, i.category, i.title, x.url, x.detail, (x.files || []).map(f => f.url).join(" "), i.fix])));
     return toCsv(rows);
   }
 

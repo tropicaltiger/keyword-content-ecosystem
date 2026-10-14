@@ -3,6 +3,11 @@
 Crawl a website, then tell the user, for each target keyword, whether to **optimize an existing page**,
 **create a new page**, or **fix pages that compete**, plus technical issues and how the site is structured.
 
+## Phase 6: small improvements
+- **Issues** list the actual image files (name linked to the image, with size) for large images, older formats, missing dimensions, missing alt text, no lazy loading and broken files.
+- **Keywords:** each card has a Title / H1 / meta description / body table (now vs starter suggestion) and a *Write these with AI* button (needs `ANTHROPIC_API_KEY`).
+- **Overview:** the number boxes and the "Fix first" rows are clickable and jump to the matching issue or a filtered Pages list.
+
 ## Phase 5: competitors, links and speed
 - **Pages tab: size.** Approximate page weight (HTML plus images, scripts and stylesheets found in it, up to 250 files measured per crawl), with the problems found (large images, old formats, no compression, heavy JavaScript, missing dimensions, no lazy loading, broken files), how to fix each, and a rough saving estimate.
 - **Competitors tab:** crawl up to 3 competitor sites and compare their best page for each of your keywords; topics they cover that you do not; **backlink gap** from pasted or uploaded CSV exports (no data provider needed, because crawling cannot discover backlinks); **Google Business Profile** rivals via Google's Places API (needs `GOOGLE_PLACES_API_KEY`), with manual comparison links and a checklist when no key is set.
