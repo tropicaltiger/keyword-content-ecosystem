@@ -236,6 +236,11 @@
     if (mode === "sitemap") { pageFilterFn = p => p.in_sitemap; msg = "Showing only pages listed in the sitemap."; }
     else if (mode === "heavy") { sort.key = "weight_kb"; msg = "Sorted by size, largest first."; }
     else if (mode === "words") { sort.key = "word_count"; sort.dir = 1; msg = "Sorted by word count, shortest first."; }
+    else if (mode.startsWith("depth")) {
+      const n = mode === "depthNone" ? null : parseInt(mode.slice(5), 10);
+      pageFilterFn = p => (p.depth ?? null) === n; sort.key = "inbound"; sort.dir = -1;
+      msg = n === null ? "Showing pages that no page we read links to." : n === 0 ? "Showing the homepage." : `Showing pages that are ${n} click${n === 1 ? "" : "s"} from the homepage.`;
+    }
     const note = $("#pfnote");
     note.hidden = !msg;
     note.innerHTML = msg ? `${esc(msg)} <button type="button" class="ghost" id="pfclear">Show all</button>` : "";
@@ -309,8 +314,20 @@
       <div class="insights">${a.insights.map(i => `<div class="ins"><span class="badge ${i.level === "good" ? "good" : i.level === "warn" ? "warn" : "note"}">${lv[i.level]}</span><span>${esc(i.text)}</span></div>`).join("")}</div>
 
       <h3>How many clicks from the homepage?</h3>
-      <p class="muted">Picture a visitor on your homepage. A page that is <b>1 click away</b> is linked straight from the homepage or menu. Pages that need 4 or more clicks are hard for visitors and for Google to find.</p>
-      <div class="bars">${a.depth.map(d => `<div class="barrow"><span>${depthLabel(d.depth)}</span><i><b class="${d.depth === "Not linked" ? "amber" : ""}" style="width:${d.count / max * 100}%"></b></i><span>${d.count} (${d.percent}%)</span></div>`).join("")}</div>
+      <p>Imagine you are a visitor on your homepage, and you can only <b>click links</b>. How many clicks does it take to reach each page?</p>
+      <ul class="list">
+        <li><b>1 click away:</b> one click, usually a menu item.</li>
+        <li><b>2 clicks away:</b> homepage, then another page, then this page.</li>
+        <li><b>The further away, the harder to find</b> for visitors and for Google. Keep your important pages within <b>3 clicks</b>.</li>
+      </ul>
+      <p class="muted small">Teal bars are fine, amber bars are 4 or more clicks away, and grey is not reachable by links. Click a row to see those pages.</p>
+      <div class="bars">${a.depth.map(d => {
+        const cls = d.depth === "Not linked" ? "grey" : d.depth >= 4 ? "amber" : "";
+        const ex = d.examples.length ? `<span class="sub">for example ${d.examples.map(e => esc(e.path)).join(", ")}</span>` : "";
+        return `<button type="button" class="barrow" data-go="pages:depth${d.depth === "Not linked" ? "None" : d.depth}"><span>${depthLabel(d.depth)}${ex}</span><i><b class="${cls}" style="width:${d.count / max * 100}%"></b></i><span>${d.count} (${d.percent}%)</span></button>`;
+      }).join("")}</div>
+      ${a.deep_route ? `<div class="route"><b>What ${a.deep_route.clicks} clicks looks like on your site:</b> a visitor starts on the homepage and has to click through
+        ${a.deep_route.route.map((r, i) => i === 0 ? "<b>Homepage</b>" : `<span class="arrow">then</span> ${link(r.url, r.path)}`).join(" ")}.</div>` : ""}
 
       <h3>What kinds of pages do you have?</h3>
       <p class="muted">The tool guesses each page's type from its web address and content. Check the examples to see if it guessed right.</p>

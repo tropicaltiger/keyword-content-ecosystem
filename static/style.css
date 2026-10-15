@@ -200,3 +200,10 @@ tr.you td { background: #eaf6f0; }
 .ins { display: flex; gap: 10px; align-items: baseline; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; }
 .ins .badge { flex: none; }
 @media (max-width: 700px) { .barrow { grid-template-columns: 1fr 70px; } .barrow i { grid-column: 1 / -1; order: 3; } }
+
+button.barrow { background: none; border: 0; border-radius: 6px; width: 100%; text-align: left; cursor: pointer; font: inherit; color: inherit; padding: 6px 8px; margin: 0 -8px; }
+button.barrow:hover { background: #f1f5f8; }
+.barrow .sub { max-width: none; white-space: normal; }
+.barrow i b.grey { background: #8a97a8; }
+.route { margin-top: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; line-height: 1.8; }
+.route .arrow { color: var(--muted); font-size: 13px; margin: 0 2px; }

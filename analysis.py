@@ -283,12 +283,13 @@ def analyze(data, keywords):
     home0 = by_url.get(data["root"]) or pages[0]
     home_out = home0["_out"]
     # click depth from the real link map (not from the order pages happened to be fetched in)
-    dist, queue = {home0["url"]: 0}, deque([home0["url"]])
+    dist, queue, parent = {home0["url"]: 0}, deque([home0["url"]]), {}
     while queue:
         cur = queue.popleft()
         for t in by_url[cur]["_out"]:
             if t not in dist:
                 dist[t] = dist[cur] + 1
+                parent[t] = cur
                 queue.append(t)
     for p in pages:
         p["depth"] = dist.get(p["url"])
@@ -541,6 +542,15 @@ def analyze(data, keywords):
     if svc and menu_only:
         insights.append({"level": "warn", "text": f"{len(menu_only)} of {len(svc)} service pages ({round(100 * len(menu_only) / len(svc))}%) are linked only from menus or footers, "
                          "never from page text. Link to them from related blog posts and service pages to help them rank."})
+    deepest = max(dist.values())
+    deep_route = None
+    if deepest >= 2:
+        target = sorted((u for u, d in dist.items() if d == deepest))[0]
+        chain, u = [], target
+        while u:
+            chain.append({"url": u, "path": by_url[u]["path"]})
+            u = parent.get(u)
+        deep_route = {"clicks": deepest, "route": chain[::-1]}
     architecture = {
         "insights": insights, "crawl_limited": bool(data["truncated"]), "max_pages": data["max_pages"],
         "page_types": [{"type": t, "count": len(v), "percent": round(100 * len(v) / total), "help": TYPE_HELP.get(t, ""),
@@ -551,8 +561,12 @@ def analyze(data, keywords):
                       "avg_inbound": round(sum(x["inbound"] for x in v) / len(v), 1),
                       "avg_inbound_body": round(sum(x["inbound_body"] for x in v) / len(v), 1)}
                      for s, v in sorted(sections.items(), key=lambda kv: -len(kv[1]))[:20]],
-        "depth": [{"depth": k, "count": v, "percent": round(100 * v / total)} for k, v in sorted(
-            depth_counts.items(), key=lambda kv: (kv[0] == "Not linked", kv[0] if kv[0] != "Not linked" else 0))],
+        "depth": [{"depth": k, "count": v, "percent": round(100 * v / total),
+                   "examples": [{"url": x["url"], "path": x["path"]} for x in sorted(
+                       (p for p in pages if ("Not linked" if p["depth"] is None else p["depth"]) == k),
+                       key=lambda x: (-x["inbound"], x["path"]))[:2]]}
+                  for k, v in sorted(depth_counts.items(), key=lambda kv: (kv[0] == "Not linked", kv[0] if kv[0] != "Not linked" else 0))],
+        "deep_route": deep_route,
         "most_linked": [{"url": p["url"], "path": p["path"], "inbound": p["inbound"], "inbound_body": p["inbound_body"], "title": p["title"]}
                         for p in sorted(pages, key=lambda x: -x["inbound"])[:10]],
         "orphans": [{"url": p["url"], "path": p["path"]} for p in pages
